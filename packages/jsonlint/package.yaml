@@ -1,0 +1,15 @@
+name: jsonlint
+description: A JSON linter and reformatter.
+homepage: https://github.com/zaach/jsonlint
+licenses:
+  - MIT
+languages:
+  - JSON
+filetypes:
+  - "*.json"
+categories:
+  - Linter
+source:
+  id: pkg:npm/jsonlint@1.6.3
+bin:
+  jsonlint: npm:jsonlint

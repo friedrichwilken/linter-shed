@@ -1,0 +1,16 @@
+name: ruff
+description: An extremely fast Python linter and code formatter.
+homepage: https://github.com/astral-sh/ruff
+licenses:
+  - MIT
+languages:
+  - Python
+filetypes:
+  - "*.py"
+categories:
+  - Linter
+  - Formatter
+source:
+  id: pkg:pypi/ruff@0.9.10
+bin:
+  ruff: pip:ruff

@@ -1,0 +1,16 @@
+name: yamllint
+description: A linter for YAML files.
+homepage: https://github.com/adrienverge/yamllint
+licenses:
+  - GPL-3.0-or-later
+languages:
+  - YAML
+filetypes:
+  - "*.yaml"
+  - "*.yml"
+categories:
+  - Linter
+source:
+  id: pkg:pypi/yamllint@1.35.1
+bin:
+  yamllint: pip:yamllint
