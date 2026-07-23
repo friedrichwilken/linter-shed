@@ -43,7 +43,14 @@ acquire_lock() {
     exec 9>"${LOCK_PATH}"
     flock -n 9 || die "shed already running (lock: ${LOCK_PATH})"
   else
-    # mkdir is atomic; succeeds only if the directory didn't exist
+    # Clean up stale lock from a dead process
+    if [[ -f "${_LOCK_DIR}/pid" ]]; then
+      local lock_pid
+      lock_pid="$(cat "${_LOCK_DIR}/pid" 2>/dev/null)"
+      if [[ -n "${lock_pid}" ]] && ! kill -0 "${lock_pid}" 2>/dev/null; then
+        rm -rf "${_LOCK_DIR}"
+      fi
+    fi
     local deadline=$(( $(date +%s) + 5 ))
     until mkdir "${_LOCK_DIR}" 2>/dev/null; do
       [[ $(date +%s) -lt $deadline ]] || die "shed already running (lock: ${_LOCK_DIR})"
@@ -70,7 +77,7 @@ read_installed_version() {
   local tool="$1"
   local vfile="${VERSIONS_DIR}/${tool}"
   if [[ -f "${vfile}" ]]; then
-    cat "${vfile}"
+    head -1 "${vfile}"
   else
     echo ""
   fi
@@ -79,6 +86,8 @@ read_installed_version() {
 write_installed_version() {
   local tool="$1"
   local version="$2"
+  # Strip any newlines — version must be a single line
+  version="$(printf '%s' "${version}" | head -1 | tr -d '\r\n')"
   mkdir -p "${VERSIONS_DIR}"
   printf '%s\n' "${version}" > "${VERSIONS_DIR}/${tool}"
 }
@@ -447,7 +456,7 @@ install_npm_tool() {
 
   log "installing ${tool}@${version} via npm..."
   mkdir -p "${tool_dir}"
-  npm install --prefix "${tool_dir}" "${package}@${version}" --save-exact --no-audit --no-fund >&2
+  npm install --prefix "${tool_dir}" "${package}@${version}" --save-exact --no-audit --no-fund --silent >&2
 
   # Symlink all binaries into tool's bin/
   mkdir -p "${tool_dir}/bin"
@@ -1384,7 +1393,17 @@ cmd_check() {
     installed_version="$(read_installed_version "${tool}")"
 
     if [[ -z "${installed_version}" ]] || [[ "${installed_version}" != "${registry_version}" ]]; then
-      install_tool "${tool}"
+      if ! install_tool "${tool}" 2>/tmp/shed_install_err_$$; then
+        local err_msg
+        err_msg="$(head -1 /tmp/shed_install_err_$$ 2>/dev/null)"
+        rm -f /tmp/shed_install_err_$$
+        python3 -c "
+import sys, json
+print(json.dumps({'ok': False, 'diagnostics': [], 'error': 'failed to install ' + sys.argv[1] + ': ' + sys.argv[2]}))
+" "${tool}" "${err_msg:-unknown error}"
+        return 0
+      fi
+      rm -f /tmp/shed_install_err_$$
     fi
   else
     log "warning: no package file found for tool '${tool}'"
