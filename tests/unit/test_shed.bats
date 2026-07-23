@@ -14,7 +14,7 @@ _source_shed() {
   local patched
   patched="$(mktemp "${BATS_TMPDIR}/shed_patched_XXXXXX")"
   # Replace the last line `main "$@"` with a guarded version
-  grep -v '^main "\$@"$' "${BATS_TEST_DIRNAME}/../../shed.sh" > "${patched}"
+  grep -v '^main "$@"$' "${BATS_TEST_DIRNAME}/../../shed.sh" > "${patched}"
   printf '\nif [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then main "$@"; fi\n' >> "${patched}"
   # shellcheck disable=SC1090
   source "${patched}"

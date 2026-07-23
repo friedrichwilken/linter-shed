@@ -61,7 +61,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install bats-core
-        run: npm install -g bats
+        run: sudo npm install -g bats
 
       - name: Run unit tests
         run: |
@@ -98,7 +98,7 @@ jobs:
           node-version: "lts/*"
 
       - name: Install bats-core
-        run: npm install -g bats
+        run: sudo npm install -g bats
 
       # Cache ~/.linter-shed per OS so tool downloads are reused across runs.
       # Key includes OS + hash of all package.yaml files so the cache is

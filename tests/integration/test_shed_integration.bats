@@ -13,10 +13,10 @@
 
 load '../helpers/common'
 
-SHED="${SHED_REPO_ROOT}/shed.sh"
-FIXTURES_DIR="${SHED_REPO_ROOT}/tests/fixtures"
-
 setup() {
+    export SHED_REPO_ROOT="${BATS_TEST_DIRNAME}/../.."
+    export SHED="${SHED_REPO_ROOT}/shed.sh"
+    export FIXTURES_DIR="${SHED_REPO_ROOT}/tests/fixtures"
     setup_test_shed_dir
 }
 

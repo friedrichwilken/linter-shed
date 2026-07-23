@@ -10,13 +10,13 @@
 
 load '../helpers/common'
 
-HOOK="${SHED_REPO_ROOT}/hooks/post-edit.sh"
-FIXTURES_DIR="${SHED_REPO_ROOT}/tests/fixtures"
-
 # Saved real HOME so we can restore in teardown
 _REAL_HOME="$HOME"
 
 setup() {
+    export SHED_REPO_ROOT="${BATS_TEST_DIRNAME}/../.."
+    export HOOK="${SHED_REPO_ROOT}/hooks/post-edit.sh"
+    export FIXTURES_DIR="${SHED_REPO_ROOT}/tests/fixtures"
     setup_test_shed_dir
 
     # Redirect HOME so the hook's `$HOME/.linter-shed/bin/shed` lookup hits
