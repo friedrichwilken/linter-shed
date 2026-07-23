@@ -584,13 +584,13 @@ github_release_url() {
   local source="$1"   # e.g. pkg:github/rhysd/actionlint
   local version="$2"  # e.g. 1.7.12
   local asset="$3"
+  local tag_prefix="${4:-v}"
 
-  # Extract org/repo from pkg:github/org/repo
   local repo_path="${source#pkg:github/}"
   local org="${repo_path%%/*}"
   local repo="${repo_path##*/}"
 
-  echo "https://github.com/${org}/${repo}/releases/download/v${version}/${asset}"
+  echo "https://github.com/${org}/${repo}/releases/download/${tag_prefix}${version}/${asset}"
 }
 
 # Get asset and binary for current platform from tool info JSON
@@ -695,8 +695,11 @@ install_tool() {
         local bin_name
         bin_name="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); b=d.get('bin',{}); print(list(b.keys())[0] if b else sys.argv[2])" "${tool_json}" "${tool}")"
 
+        local tag_prefix
+        tag_prefix="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d.get('tag_prefix','v'))" "${tool_json}")"
+
         local download_url
-        download_url="$(github_release_url "${source}" "${registry_version}" "${asset}")"
+        download_url="$(github_release_url "${source}" "${registry_version}" "${asset}" "${tag_prefix}")"
 
         install_github_tool "${tool}" "${registry_version}" "${asset}" "${binary_in_archive}" "${download_url}" "${bin_name}"
       fi
@@ -1086,18 +1089,32 @@ findings = []
 error = None
 
 if exit_code != 0:
-    # jsonlint outputs errors to stderr: "Error: ... at line N column M"
+    # jsonlint outputs errors to stderr in two formats:
+    # old: "Error: ... at line N column M"
+    # new: "[error] file: SyntaxError: ... (LINE:COL)"
     combined = (stderr.strip() or stdout.strip())
-    m = re.search(r'line (\d+)', combined)
-    m2 = re.search(r'column (\d+)', combined)
-    line = int(m.group(1)) if m else 0
-    col = int(m2.group(1)) if m2 else 0
+    # Strip ANSI color codes
+    combined_clean = re.sub(r'\x1b\[[0-9;]*m', '', combined)
+    # Try "(LINE:COL)" format first
+    m = re.search(r'\((\d+):(\d+)\)', combined_clean)
+    if m:
+        line, col = int(m.group(1)), int(m.group(2))
+    else:
+        m_line = re.search(r'line (\d+)', combined_clean)
+        m_col = re.search(r'column (\d+)', combined_clean)
+        line = int(m_line.group(1)) if m_line else 0
+        col = int(m_col.group(1)) if m_col else 0
+    # Use first non-empty line as message, strip [error] prefix
+    first_line = next((l.strip() for l in combined_clean.splitlines() if l.strip()), combined_clean)
+    first_line = re.sub(r'^\[error\]\s*', '', first_line)
+    # Strip file path prefix "file: " if present
+    first_line = re.sub(r'^[^:]+:\s*', '', first_line, count=1)
     findings.append({
         "file": file,
         "line": line,
         "col": col,
         "severity": "error",
-        "message": combined.split('\n')[0],
+        "message": first_line,
         "rule": "syntax"
     })
 

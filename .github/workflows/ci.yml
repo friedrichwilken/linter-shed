@@ -120,7 +120,8 @@ jobs:
         run: |
           for pkg in packages/*/package.yaml; do
             tool="$(basename "$(dirname "$pkg")")"
-            SHED_DIR="$HOME/.linter-shed" bash shed.sh install "$tool" 2>/dev/null || true
+            echo "Installing $tool..."
+            SHED_DIR="$HOME/.linter-shed" BUNDLED_REGISTRY_DIR="$(pwd)/packages" bash shed.sh install "$tool" || echo "WARN: $tool install failed (non-fatal)"
           done
 
       - name: Run integration tests

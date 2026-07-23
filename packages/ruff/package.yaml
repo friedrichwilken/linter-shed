@@ -2,6 +2,7 @@ name: ruff
 description: Extremely fast Python linter and formatter
 source: pkg:github/astral-sh/ruff
 version: "0.11.13"
+tag_prefix: ""
 filetypes:
   - "*.py"
   - "*.pyi"
