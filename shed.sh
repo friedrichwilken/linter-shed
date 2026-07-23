@@ -34,16 +34,33 @@ log() {
 # ---------------------------------------------------------------------------
 # Process safety: lock and trap
 # ---------------------------------------------------------------------------
+# Use flock on Linux; fall back to mkdir-based lock on macOS (no flock).
+_LOCK_DIR="${SHED_DIR}.lock.d"
+
 acquire_lock() {
   mkdir -p "${SHED_DIR}"
-  exec 9>"${LOCK_PATH}"
-  flock -n 9 || die "shed already running (lock: ${LOCK_PATH})"
+  if command -v flock &>/dev/null; then
+    exec 9>"${LOCK_PATH}"
+    flock -n 9 || die "shed already running (lock: ${LOCK_PATH})"
+  else
+    # mkdir is atomic; succeeds only if the directory didn't exist
+    local deadline=$(( $(date +%s) + 5 ))
+    until mkdir "${_LOCK_DIR}" 2>/dev/null; do
+      [[ $(date +%s) -lt $deadline ]] || die "shed already running (lock: ${_LOCK_DIR})"
+      sleep 0.1
+    done
+    echo $$ > "${_LOCK_DIR}/pid"
+  fi
 }
 
 release_lock() {
-  flock -u 9 2>/dev/null || true
-  exec 9>&- 2>/dev/null || true
-  rm -f "${LOCK_PATH}"
+  if command -v flock &>/dev/null; then
+    flock -u 9 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
+    rm -f "${LOCK_PATH}"
+  else
+    rm -rf "${_LOCK_DIR}"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -430,7 +447,7 @@ install_npm_tool() {
 
   log "installing ${tool}@${version} via npm..."
   mkdir -p "${tool_dir}"
-  npm install --prefix "${tool_dir}" "${package}@${version}" --save-exact --no-audit --no-fund
+  npm install --prefix "${tool_dir}" "${package}@${version}" --save-exact --no-audit --no-fund >&2
 
   # Symlink all binaries into tool's bin/
   mkdir -p "${tool_dir}/bin"
@@ -1423,7 +1440,7 @@ cmd_update() {
     installed_version="$(read_installed_version "${tool}")"
 
     if [[ -z "${installed_version}" ]]; then
-      # Not installed, skip
+      echo "${tool}: not installed (skipped)"
       (( skipped++ )) || true
       continue
     fi
@@ -1434,16 +1451,16 @@ cmd_update() {
     registry_version="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d.get('version',''))" "${tool_json}")"
 
     if [[ "${installed_version}" == "${registry_version}" ]]; then
-      log "${tool}: already current (${registry_version})"
+      echo "${tool}: already current (${registry_version})"
       (( current++ )) || true
     else
-      log "${tool}: updating ${installed_version} -> ${registry_version}"
+      echo "${tool}: updating ${installed_version} -> ${registry_version}"
       install_tool "${tool}"
       (( updated++ )) || true
     fi
   done
 
-  log "update complete: ${updated} updated, ${current} already current, ${skipped} not installed (skipped)"
+  echo "update complete: ${updated} updated, ${current} already current, ${skipped} not installed (skipped)"
 }
 
 cmd_list() {
