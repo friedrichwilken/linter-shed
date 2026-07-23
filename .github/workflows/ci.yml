@@ -116,6 +116,9 @@ jobs:
       # SHED_DIR is set to ~/.linter-shed so shed.sh writes there, not to the
       # per-test tmpdir that common.bash would otherwise create.
       # Failures are soft: a missing tool will be downloaded by the test itself.
+      - name: Fix npm cache permissions
+        run: sudo chown -R $(whoami) ~/.npm 2>/dev/null || true
+
       - name: Pre-warm tool installs
         run: |
           for pkg in packages/*/package.yaml; do

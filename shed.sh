@@ -591,7 +591,7 @@ github_release_url() {
   local source="$1"   # e.g. pkg:github/rhysd/actionlint
   local version="$2"  # e.g. 1.7.12
   local asset="$3"
-  local tag_prefix="${4:-v}"
+  local tag_prefix="${4-v}"  # use ${4-v} not ${4:-v}: empty string is valid
 
   local repo_path="${source#pkg:github/}"
   local org="${repo_path%%/*}"
@@ -945,25 +945,33 @@ PYEOF
 parse_prettier() {
   local file="$1" stdout_file="$2" stderr_file="$3" exit_code="$4"
   python3 - "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" <<'PYEOF'
-import sys, json
+import sys, json, re
 
 file = sys.argv[1]
 stdout = open(sys.argv[2]).read()
 stderr = open(sys.argv[3]).read()
 exit_code = int(sys.argv[4])
 
-# prettier --check exits 1 when formatting is needed, 2 on error
+# prettier --check: 0=formatted, 1=needs formatting, 2=parse error
 if exit_code >= 2:
-    result = {"ok": False, "diagnostics": [], "error": stderr.strip() or stdout.strip()}
+    combined = stderr.strip() or stdout.strip()
+    # Strip ANSI codes
+    clean = re.sub(r'\x1b\[[0-9;]*m', '', combined)
+    # Try to extract line/col from "(LINE:COL)" in prettier error output
+    m = re.search(r'\((\d+):(\d+)\)', clean)
+    if m:
+        line, col = int(m.group(1)), int(m.group(2))
+    else:
+        line, col = 0, 0
+    first = next((l.strip() for l in clean.splitlines() if l.strip()), clean)
+    first = re.sub(r'^\[error\]\s*', '', first)
+    first = re.sub(r'^[^:]+:\s*', '', first, count=1)
+    findings = [{"file": file, "line": line, "col": col, "severity": "error",
+                 "message": first, "rule": "syntax"}]
+    result = {"ok": False, "diagnostics": findings, "error": None}
 elif exit_code == 1:
-    findings = [{
-        "file": file,
-        "line": 0,
-        "col": 0,
-        "severity": "warning",
-        "message": "File is not formatted by prettier",
-        "rule": "format"
-    }]
+    findings = [{"file": file, "line": 0, "col": 0, "severity": "warning",
+                 "message": "File is not formatted by prettier", "rule": "format"}]
     result = {"ok": False, "diagnostics": findings, "error": None}
 else:
     result = {"ok": True, "diagnostics": [], "error": None}
