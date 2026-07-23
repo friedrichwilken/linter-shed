@@ -132,8 +132,12 @@ while i < len(lines):
         m = re.match(r'^(\w[\w-]*):\s*(.*)', line)
         if m:
             current_key = m.group(1)
-            val = m.group(2).strip().strip('"').strip("'")
-            if val:
+            raw = m.group(2).strip()
+            # Preserve explicitly-quoted empty strings (e.g. tag_prefix: "")
+            was_quoted = (raw.startswith('"') and raw.endswith('"')) or \
+                         (raw.startswith("'") and raw.endswith("'"))
+            val = raw.strip('"').strip("'")
+            if val or was_quoted:
                 result[current_key] = val
                 current_list = None
                 current_nested = None
@@ -224,8 +228,11 @@ for entry in sorted(os.listdir(pkgs_dir)):
             m = re.match(r'^(\w[\w-]*):\s*(.*)', line)
             if m:
                 current_key = m.group(1)
-                val = m.group(2).strip().strip('"').strip("'")
-                if val:
+                raw = m.group(2).strip()
+                was_quoted = (raw.startswith('"') and raw.endswith('"')) or \
+                             (raw.startswith("'") and raw.endswith("'"))
+                val = raw.strip('"').strip("'")
+                if val or was_quoted:
                     result[current_key] = val
                     current_nested = None
                     current_dict_key = None
@@ -456,7 +463,7 @@ install_npm_tool() {
 
   log "installing ${tool}@${version} via npm..."
   mkdir -p "${tool_dir}"
-  npm install --prefix "${tool_dir}" "${package}@${version}" --save-exact --no-audit --no-fund --silent >&2
+  npm install --prefix "${tool_dir}" "${package}@${version}" --save-exact --no-audit --no-fund >&2
 
   # Symlink all binaries into tool's bin/
   mkdir -p "${tool_dir}/bin"
@@ -736,11 +743,18 @@ run_linter() {
   local tool_dir="${TOOLS_DIR}/${tool}"
   export PATH="${tool_dir}/bin:${SHED_BIN}:${PATH}"
 
+  local tool_bin="${tool_dir}/bin/${tool}"
+  if [[ ! -x "${tool_bin}" ]]; then
+    python3 -c "
+import sys, json
+print(json.dumps({'ok': False, 'diagnostics': [], 'error': 'tool binary not found: ' + sys.argv[1]}))
+" "${tool_bin}"
+    return 0
+  fi
+
   local stdout_file stderr_file exit_code
   stdout_file="$(mktemp /tmp/shed_stdout_XXXXXX)"
   stderr_file="$(mktemp /tmp/shed_stderr_XXXXXX)"
-
-  local tool_bin="${tool_dir}/bin/${tool}"
 
   set +e
   case "${tool}" in
