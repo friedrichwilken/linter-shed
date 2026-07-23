@@ -8,7 +8,7 @@ set +e
 # Read full stdin
 INPUT=$(cat)
 
-# Extract tool_name and file_path using python3
+# Extract tool_name using python3
 TOOL_NAME=$(python3 -c "
 import sys, json
 try:
@@ -44,16 +44,30 @@ if [[ ! -x "$SHED_BIN" ]]; then
   exit 0
 fi
 
-# Run shed check and capture JSON output
-SHED_OUTPUT=$("$SHED_BIN" check "$FILE_PATH" 2>/dev/null)
+# Run shed check, capturing stdout and stderr separately.
+# When shed produces no stdout (unexpected crash), surface the stderr so
+# Claude knows what went wrong rather than silently discarding it.
+SHED_STDERR_FILE="$(mktemp /tmp/shed_hook_XXXXXX)"
+SHED_OUTPUT=$("$SHED_BIN" check "$FILE_PATH" 2>"$SHED_STDERR_FILE")
+SHED_EXIT=$?
 
-# If shed produced no output (unexpected crash), exit silently
 if [[ -z "$SHED_OUTPUT" ]]; then
-  exit 0
+  SHED_STDERR_CONTENT="$(cat "$SHED_STDERR_FILE")"
+  rm -f "$SHED_STDERR_FILE"
+  python3 -c "
+import json, sys
+stderr = sys.argv[1]
+file_path = sys.argv[2]
+msg = 'linter-shed: shed check crashed or produced no output for ' + file_path
+if stderr:
+    msg += ': ' + stderr.splitlines()[0]
+print(json.dumps({'systemMessage': msg}))
+" "$SHED_STDERR_CONTENT" "$FILE_PATH"
+  exit 2
 fi
+rm -f "$SHED_STDERR_FILE"
 
-# Parse ok and skipped flags, build diagnostic text.
-# Pipe $SHED_OUTPUT into python3 via echo so the heredoc can supply the script body.
+# Parse ok and diagnostics; build systemMessage if issues found.
 echo "$SHED_OUTPUT" | python3 - <<'PYEOF'
 import sys, json
 
@@ -90,8 +104,7 @@ system_msg = (
     "Please fix these issues."
 )
 
-import json as _json
-print(_json.dumps({"systemMessage": system_msg}))
+print(json.dumps({"systemMessage": system_msg}))
 sys.exit(2)
 PYEOF
 

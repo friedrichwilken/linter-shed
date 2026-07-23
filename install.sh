@@ -32,8 +32,8 @@ fi
 cp "$REGISTRY_DIR/shed.sh" "$BIN_DIR/shed"
 chmod +x "$BIN_DIR/shed"
 
-# Write last-checked timestamp
-date -u +"%Y-%m-%dT%H:%M:%SZ" > "$LINTER_SHED_DIR/.last-checked"
+# Write last-checked timestamp as Unix epoch (integer) so shed.sh TTL math works
+date +%s > "$LINTER_SHED_DIR/last-checked"
 
 echo ""
 echo "==> linter-shed installed successfully."
@@ -48,8 +48,8 @@ echo "  2. Reload your shell:"
 echo ""
 echo "       source ~/.zshrc"
 echo ""
-echo "  3. Add the linter-shed marketplace to Claude Code:"
+echo "  3. Add the linter-shed plugin to Claude Code:"
 echo ""
-echo "       claude mcp add --scope user linter-shed $BIN_DIR/shed"
+echo "       /plugin marketplace add https://github.com/friedrichwilken/linter-shed"
 echo ""
 echo "  Run 'shed --help' to get started."

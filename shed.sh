@@ -129,7 +129,7 @@ while i < len(lines):
                 result[current_key].append(val)
             current_nested = None
         else:
-            # Nested dict key
+            # Nested dict key -- regex allows linux/amd64 style keys
             m = re.match(r'^(\S[\w/.-]*):\s*(.*)', line_stripped)
             if m:
                 nested_key = m.group(1)
@@ -220,6 +220,7 @@ for entry in sorted(os.listdir(pkgs_dir)):
                 current_nested = None
                 current_dict_key = None
             else:
+                # Allow linux/amd64 style keys
                 m = re.match(r'^([\w/.\-]+):\s*(.*)', line_stripped)
                 if m:
                     nested_key = m.group(1)
@@ -313,6 +314,10 @@ get_packages_dir() {
 # Tool discovery: find_tool_for_file
 # ---------------------------------------------------------------------------
 # Uses Python3 fnmatch to match a file against tool patterns.
+# Evaluates all tools and all patterns; the tool whose matched pattern is
+# longest wins (specificity). On a tie, >= ensures the last alphabetically-
+# sorted tool wins rather than the first, avoiding systematic alphabetical
+# bias.
 find_tool_for_file() {
   local file="$1"
   local pkgs_dir
@@ -326,7 +331,7 @@ pkgs_dir = sys.argv[2]
 
 basename = os.path.basename(filepath)
 
-# Ordered list of (tool_name, patterns)
+# Build ordered list of (tool_name, patterns)
 tools = []
 for entry in sorted(os.listdir(pkgs_dir)):
     pkg_file = os.path.join(pkgs_dir, entry, "package.yaml")
@@ -354,38 +359,41 @@ for entry in sorted(os.listdir(pkgs_dir)):
 
     tools.append((name, filetypes))
 
+best_tool = ""
+best_len = -1
+
 for tool_name, patterns in tools:
     for pattern in patterns:
-        # Try full path match first (handles absolute path against absolute path)
+        matched = False
+        # Try full path match first
         if fnmatch.fnmatch(filepath, pattern):
-            print(tool_name)
-            sys.exit(0)
+            matched = True
         # Try basename match for simple *.ext patterns (e.g. *.yaml, Dockerfile)
-        if fnmatch.fnmatch(basename, pattern):
-            print(tool_name)
-            sys.exit(0)
+        elif fnmatch.fnmatch(basename, pattern):
+            matched = True
         # Try matching path suffix for relative patterns like .github/workflows/*.yaml
-        # Strip any leading **/  then check if the filepath ends with a segment matching the pattern
-        if not pattern.startswith('*'):
-            # Pattern is a relative path like ".github/workflows/*.yaml"
-            # Check if the filepath contains this path as a suffix
-            # We match against every trailing sub-path of filepath
+        elif not pattern.startswith('*'):
             parts = filepath.split(os.sep)
             pattern_parts = pattern.split('/')
             n = len(pattern_parts)
             if len(parts) >= n:
                 suffix = os.sep.join(parts[-n:])
                 if fnmatch.fnmatch(suffix, os.sep.join(pattern_parts)):
-                    print(tool_name)
-                    sys.exit(0)
+                    matched = True
         # Try **/X style: match basename against the non-glob suffix
-        if '**' in pattern:
+        elif '**' in pattern:
             suffix_pattern = pattern.lstrip('*').lstrip('/')
             if fnmatch.fnmatch(basename, suffix_pattern):
-                print(tool_name)
-                sys.exit(0)
+                matched = True
 
-print("")
+        # Use >= so that on a tie the last tool evaluated wins rather than
+        # the first -- avoids systematic alphabetical-order bias for equal-
+        # length patterns.
+        if matched and len(pattern) >= best_len:
+            best_len = len(pattern)
+            best_tool = tool_name
+
+print(best_tool)
 PYEOF
 }
 
@@ -558,13 +566,6 @@ github_release_url() {
   echo "https://github.com/${org}/${repo}/releases/download/v${version}/${asset}"
 }
 
-# Some tools use different tag formats (no v prefix, etc.)
-# actionlint uses v prefix, shellcheck uses v prefix, hadolint uses v prefix
-# golangci-lint uses v prefix
-# taplo uses v prefix
-# ruff uses v prefix
-# luacheck: no GitHub release for all platforms; handled separately
-
 # Get asset and binary for current platform from tool info JSON
 get_platform_asset() {
   local tool_json="$1"
@@ -679,8 +680,8 @@ install_tool() {
       ;;
   esac
 
-  # Capture actual installed version -- strip tool-name prefix to store bare version number.
-  # e.g. "ruff 0.11.13" -> "0.11.13", "actionlint 1.7.12" -> "1.7.12"
+  # Capture actual installed version -- strip tool-name prefix to store bare
+  # version number. e.g. "ruff 0.11.13" -> "0.11.13"
   local actual_version="${registry_version}"
   local tool_bin="${TOOLS_DIR}/${tool}/bin/${tool}"
   if [[ -x "${tool_bin}" ]]; then
@@ -701,17 +702,10 @@ install_tool() {
 run_linter() {
   local tool="$1"
   local file="$2"
-  local pkgs_dir
-  pkgs_dir="$(get_packages_dir)"
 
   local tool_dir="${TOOLS_DIR}/${tool}"
   export PATH="${tool_dir}/bin:${SHED_BIN}:${PATH}"
 
-  # Determine parse_format from tool name (hardcoded knowledge per spec)
-  local parse_format
-  parse_format="$(get_parse_format "${tool}")"
-
-  # Build run command and capture output
   local stdout_file stderr_file exit_code
   stdout_file="$(mktemp /tmp/shed_stdout_XXXXXX)"
   stderr_file="$(mktemp /tmp/shed_stderr_XXXXXX)"
@@ -783,19 +777,19 @@ run_linter() {
 get_parse_format() {
   local tool="$1"
   case "${tool}" in
-    yamllint)      echo "yamllint" ;;
-    eslint)        echo "eslint" ;;
-    prettier)      echo "prettier" ;;
-    ruff)          echo "ruff_json" ;;
-    shellcheck)    echo "shellcheck_json" ;;
-    actionlint)    echo "actionlint_json" ;;
-    jsonlint)      echo "jsonlint" ;;
+    yamllint)          echo "yamllint" ;;
+    eslint)            echo "eslint" ;;
+    prettier)          echo "prettier" ;;
+    ruff)              echo "ruff_json" ;;
+    shellcheck)        echo "shellcheck_json" ;;
+    actionlint)        echo "actionlint_json" ;;
+    jsonlint)          echo "jsonlint" ;;
     markdownlint-cli2) echo "markdownlint" ;;
-    hadolint)      echo "hadolint_json" ;;
-    golangci-lint) echo "golangci_json" ;;
-    taplo)         echo "taplo" ;;
-    luacheck)      echo "luacheck" ;;
-    *)             echo "generic" ;;
+    hadolint)          echo "hadolint_json" ;;
+    golangci-lint)     echo "golangci_json" ;;
+    taplo)             echo "taplo" ;;
+    luacheck)          echo "luacheck" ;;
+    *)                 echo "generic" ;;
   esac
 }
 
@@ -918,7 +912,6 @@ exit_code = int(sys.argv[4])
 if exit_code >= 2:
     result = {"ok": False, "diagnostics": [], "error": stderr.strip() or stdout.strip()}
 elif exit_code == 1:
-    # File needs formatting
     findings = [{
         "file": file,
         "line": 0,
@@ -1038,18 +1031,13 @@ else:
     else:
         items = [al_out]
     for item in items:
-        pos = item.get("filepath", file)
-        line = item.get("line", 0)
-        col = item.get("column", 0)
-        msg = item.get("message", "")
-        kind = item.get("kind", "")
         findings.append({
-            "file": pos,
-            "line": line,
-            "col": col,
+            "file": item.get("filepath", file),
+            "line": item.get("line", 0),
+            "col": item.get("column", 0),
             "severity": "error",
-            "message": msg,
-            "rule": kind
+            "message": item.get("message", ""),
+            "rule": item.get("kind", "")
         })
     result = {"ok": len(findings) == 0, "diagnostics": findings, "error": None}
 

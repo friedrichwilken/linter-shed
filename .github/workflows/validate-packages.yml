@@ -1,0 +1,85 @@
+name: Validate packages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "packages/**"
+
+jobs:
+  validate-packages:
+    name: Validate package.yaml / ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - actionlint
+          - golangci-lint
+          - hadolint
+          - jsonlint
+          - luacheck
+          - markdownlint-cli2
+          - prettier
+          - ruff
+          - shellcheck
+          - taplo
+          - yamllint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate packages/${{ matrix.package }}/package.yaml
+        run: |
+          f="packages/${{ matrix.package }}/package.yaml"
+          echo "Checking $f ..."
+          python3 - "$f" <<'EOF'
+          import sys, re
+
+          path = sys.argv[1]
+
+          try:
+              with open(path) as fh:
+                  content = fh.read()
+          except FileNotFoundError:
+              print(f"ERROR: {path} not found", file=sys.stderr)
+              sys.exit(1)
+
+          errors = []
+
+          if not content.strip():
+              errors.append("file is empty")
+
+          # Required top-level scalar keys
+          for key in ("name", "version", "source"):
+              if not re.search(rf'^{key}:\s+\S', content, re.MULTILINE):
+                  errors.append(f"missing or empty '{key}' key")
+
+          # Must have a platforms section
+          if not re.search(r'^platforms:', content, re.MULTILINE):
+              errors.append("missing 'platforms' section")
+
+          # name value must match the directory name
+          m = re.search(r'^name:\s+(\S+)', content, re.MULTILINE)
+          if m:
+              dir_name = path.split("/")[1]
+              if m.group(1) != dir_name:
+                  errors.append(
+                      f"name '{m.group(1)}' does not match directory '{dir_name}'"
+                  )
+
+          # version must be quoted (shed.sh parses it as a string)
+          if re.search(r'^version:\s+[^"\'\s]', content, re.MULTILINE):
+              errors.append("version value should be quoted (e.g. version: \"1.2.3\")")
+
+          if errors:
+              for e in errors:
+                  print(f"ERROR: {path}: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"OK: {path}")
+          EOF

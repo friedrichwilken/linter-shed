@@ -1,0 +1,8 @@
+---
+name: test
+value: 42
+bad_indent:
+    - one
+  - two
+duplicate: a
+duplicate: b

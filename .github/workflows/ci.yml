@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    name: Static validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shed.sh is executable
+        run: test -x shed.sh
+
+      - name: install.sh is executable
+        run: test -x install.sh
+
+      - name: hooks/hooks.json is valid JSON
+        run: python3 -c "import json; json.load(open('hooks/hooks.json'))"
+
+      - name: .claude-plugin/plugin.json is valid JSON
+        run: python3 -c "import json; json.load(open('.claude-plugin/plugin.json'))"
+
+      - name: All package.yaml files parse correctly
+        run: |
+          for f in packages/*/package.yaml; do
+            echo "Checking $f ..."
+            python3 - "$f" <<'EOF'
+          import sys, re
+
+          path = sys.argv[1]
+          with open(path) as fh:
+              content = fh.read()
+
+          assert content.strip(), f"{path}: file is empty"
+          assert re.search(r'^name:\s+\S', content, re.MULTILINE), f"{path}: missing 'name' key"
+          assert re.search(r'^version:\s+\S', content, re.MULTILINE), f"{path}: missing 'version' key"
+          assert re.search(r'^platforms:', content, re.MULTILINE), f"{path}: missing 'platforms' section"
+          print(f"OK: {path}")
+          EOF
+          done
+
+  unit-tests:
+    name: Unit tests / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats-core
+        run: npm install -g bats
+
+      - name: Run unit tests
+        run: |
+          mkdir -p /tmp/bats-reports
+          bats --formatter tap --report-formatter tap --output /tmp/bats-reports tests/unit/
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-logs-${{ matrix.os }}
+          path: /tmp/bats-reports/
+          if-no-files-found: ignore
+
+  integration-tests:
+    name: Integration tests / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+
+      - name: Install bats-core
+        run: npm install -g bats
+
+      # Cache ~/.linter-shed per OS so tool downloads are reused across runs.
+      # Key includes OS + hash of all package.yaml files so the cache is
+      # invalidated whenever any tool version changes.
+      - name: Cache ~/.linter-shed
+        uses: actions/cache@v4
+        with:
+          path: ~/.linter-shed
+          key: linter-shed-${{ runner.os }}-${{ hashFiles('packages/**/package.yaml') }}
+          restore-keys: |
+            linter-shed-${{ runner.os }}-
+
+      # Pre-warm the cache directory: install all tools into ~/.linter-shed so
+      # integration tests pick them up from disk rather than downloading fresh.
+      # SHED_DIR is set to ~/.linter-shed so shed.sh writes there, not to the
+      # per-test tmpdir that common.bash would otherwise create.
+      # Failures are soft: a missing tool will be downloaded by the test itself.
+      - name: Pre-warm tool installs
+        run: |
+          for pkg in packages/*/package.yaml; do
+            tool="$(basename "$(dirname "$pkg")")"
+            SHED_DIR="$HOME/.linter-shed" bash shed.sh install "$tool" 2>/dev/null || true
+          done
+
+      - name: Run integration tests
+        run: |
+          mkdir -p /tmp/bats-reports
+          bats --formatter tap --report-formatter tap --output /tmp/bats-reports tests/integration/
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-logs-${{ matrix.os }}
+          path: /tmp/bats-reports/
+          if-no-files-found: ignore

@@ -1,0 +1,11 @@
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run script
+        run: |
+          echo ${{ github.event.pull_request.title }}
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            echo "on main"
+          fi
