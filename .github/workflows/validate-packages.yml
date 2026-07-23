@@ -59,9 +59,11 @@ jobs:
               if not re.search(rf'^{key}:\s+\S', content, re.MULTILINE):
                   errors.append(f"missing or empty '{key}' key")
 
-          # Must have a platforms section
-          if not re.search(r'^platforms:', content, re.MULTILINE):
-              errors.append("missing 'platforms' section")
+          # platforms only required for github release packages
+          src = re.search(r'^source:\s+(\S+)', content, re.MULTILINE)
+          if src and src.group(1).startswith('pkg:github/'):
+              if not re.search(r'^platforms:', content, re.MULTILINE):
+                  errors.append("github source requires 'platforms' section")
 
           # name value must match the directory name
           m = re.search(r'^name:\s+(\S+)', content, re.MULTILINE)

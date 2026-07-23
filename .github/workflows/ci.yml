@@ -40,7 +40,11 @@ jobs:
           assert content.strip(), f"{path}: file is empty"
           assert re.search(r'^name:\s+\S', content, re.MULTILINE), f"{path}: missing 'name' key"
           assert re.search(r'^version:\s+\S', content, re.MULTILINE), f"{path}: missing 'version' key"
-          assert re.search(r'^platforms:', content, re.MULTILINE), f"{path}: missing 'platforms' section"
+          assert re.search(r'^source:\s+\S', content, re.MULTILINE), f"{path}: missing 'source' key"
+          # platforms only required for github release packages
+          src = re.search(r'^source:\s+(\S+)', content, re.MULTILINE)
+          if src and src.group(1).startswith('pkg:github/'):
+              assert re.search(r'^platforms:', content, re.MULTILINE), f"{path}: github source requires 'platforms' section"
           print(f"OK: {path}")
           EOF
           done
