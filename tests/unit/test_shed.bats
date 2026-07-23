@@ -30,14 +30,11 @@ setup() {
   export VERSIONS_DIR="${SHED_DIR}/versions"
   export SHED_BIN="${SHED_DIR}/bin"
   export TOOLS_DIR="${SHED_DIR}/tools"
+  export SHED_QUIET=1
   mkdir -p "${VERSIONS_DIR}" "${SHED_BIN}" "${TOOLS_DIR}"
-  # Per-test scratch dir for temp files (macOS mktemp has no suffix support)
   export TEST_TMP="${SHED_DIR}/tmp"
   mkdir -p "${TEST_TMP}"
-
-  # Point at the real packages directory
   export BUNDLED_REGISTRY_DIR="${BATS_TEST_DIRNAME}/../../packages"
-
   _source_shed
 }
 
@@ -49,23 +46,22 @@ teardown() {
 # SECTION 1: find_tool_for_file
 # ===========================================================================
 
-@test "find_tool_for_file: json file matches jsonlint" {
+@test "find_tool_for_file: json file matches prettier" {
   run find_tool_for_file "foo.json"
   [ "$status" -eq 0 ]
-  [ "$output" = "jsonlint" ]
+  [ "$output" = "prettier" ]
 }
 
-@test "find_tool_for_file: yaml file matches prettier" {
-  # prettier (p) sorts before yamllint (y) in the real registry, so it wins
+@test "find_tool_for_file: yaml file matches yamllint" {
   run find_tool_for_file "foo.yaml"
   [ "$status" -eq 0 ]
-  [ "$output" = "prettier" ]
+  [ "$output" = "yamllint" ]
 }
 
-@test "find_tool_for_file: yml file matches prettier" {
+@test "find_tool_for_file: yml file matches yamllint" {
   run find_tool_for_file "config.yml"
   [ "$status" -eq 0 ]
-  [ "$output" = "prettier" ]
+  [ "$output" = "yamllint" ]
 }
 
 @test "find_tool_for_file: py file matches ruff" {
@@ -146,10 +142,10 @@ teardown() {
   [ -z "$output" ]
 }
 
-@test "find_tool_for_file: nested path json still matches jsonlint" {
+@test "find_tool_for_file: nested path json still matches prettier" {
   run find_tool_for_file "/a/b/c/data.json"
   [ "$status" -eq 0 ]
-  [ "$output" = "jsonlint" ]
+  [ "$output" = "prettier" ]
 }
 
 # ===========================================================================

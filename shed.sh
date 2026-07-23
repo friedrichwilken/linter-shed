@@ -27,6 +27,7 @@ die() {
 }
 
 log() {
+  [[ -n "${SHED_QUIET:-}" ]] && return 0
   echo "shed: $*" >&2
 }
 

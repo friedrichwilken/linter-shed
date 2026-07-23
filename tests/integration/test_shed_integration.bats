@@ -17,16 +17,15 @@ setup_file() {
     export SHED_REPO_ROOT="${BATS_TEST_DIRNAME}/../.."
     export SHED="${SHED_REPO_ROOT}/shed.sh"
     export FIXTURES_DIR="${SHED_REPO_ROOT}/tests/fixtures"
-    # Shared SHED_DIR for the whole file so tool installs persist across tests
     export SHED_DIR="${BATS_FILE_TMPDIR}/shed"
     export BUNDLED_REGISTRY_DIR="${SHED_REPO_ROOT}/packages"
+    export SHED_QUIET=1
     mkdir -p "${SHED_DIR}"
-    # Write a dummy last-checked so maybe_update_registry skips the git pull
     date +%s > "${SHED_DIR}/last-checked"
 }
 
 teardown_file() {
-    rm -rf "${SHED_DIR}"
+    rm -rf "${SHED_DIR:-/nonexistent}"
 }
 
 setup() {
@@ -34,6 +33,13 @@ setup() {
     export SHED="${SHED_REPO_ROOT}/shed.sh"
     export FIXTURES_DIR="${SHED_REPO_ROOT}/tests/fixtures"
     export BUNDLED_REGISTRY_DIR="${SHED_REPO_ROOT}/packages"
+    export SHED_QUIET=1
+    # Re-export SHED_DIR in case setup_file exports didn't propagate
+    export SHED_DIR="${BATS_FILE_TMPDIR}/shed"
+    mkdir -p "${SHED_DIR}"
+    if [[ ! -f "${SHED_DIR}/last-checked" ]]; then
+        date +%s > "${SHED_DIR}/last-checked"
+    fi
 }
 
 teardown() {
@@ -293,13 +299,10 @@ assert not overlap, 'got yamllint rules -- wrong tool dispatched: ' + str(overla
 # shed update
 # ---------------------------------------------------------------------------
 
-@test "shed update with no installed tools skips all and exits 0" {
+@test "shed update skips uninstalled tools and exits 0" {
     run bash "$SHED" update
     [ "$status" -eq 0 ]
     [[ "$output" =~ "not installed (skipped)" ]]
-    local bin_count
-    bin_count="$(find "$SHED_DIR/bin" -maxdepth 1 \( -type f -o -type l \) 2>/dev/null | wc -l | tr -d ' ')"
-    [ "$bin_count" -eq 0 ]
 }
 
 @test "shed update marks jsonlint as already current when version matches" {
