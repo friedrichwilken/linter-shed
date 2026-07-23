@@ -68,10 +68,15 @@ fi
 rm -f "$SHED_STDERR_FILE"
 
 # Parse ok and diagnostics; build systemMessage if issues found.
-echo "$SHED_OUTPUT" | python3 - <<'PYEOF'
+# Write output to a temp file to avoid pipe/heredoc stdin conflict.
+SHED_OUTPUT_FILE="$(mktemp /tmp/shed_hook_out_XXXXXX)"
+printf '%s' "$SHED_OUTPUT" > "$SHED_OUTPUT_FILE"
+python3 - "$SHED_OUTPUT_FILE" <<'PYEOF'
 import sys, json
 
-raw = sys.stdin.read()
+with open(sys.argv[1]) as fh:
+    raw = fh.read()
+
 try:
     data = json.loads(raw)
 except Exception:
@@ -108,5 +113,6 @@ print(json.dumps({"systemMessage": system_msg}))
 sys.exit(2)
 PYEOF
 
-# Propagate python3's exit code
-exit $?
+HOOK_EXIT=$?
+rm -f "$SHED_OUTPUT_FILE"
+exit $HOOK_EXIT

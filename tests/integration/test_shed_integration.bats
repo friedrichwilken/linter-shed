@@ -5,23 +5,39 @@
 #   bats tests/integration/test_shed_integration.bats
 #
 # Notes:
-#   - Each test gets a fresh SHED_DIR; tools are auto-installed on first use.
+#   - All tests share one SHED_DIR per file (set up in setup_file).
+#     Tools installed by one test are available to subsequent tests.
 #   - Tests tagged "# @requires-internet" download binaries on first run.
-#   - Subsequent runs reuse the per-test SHED_DIR only within a single run;
-#     teardown wipes it each time. Use BATS_TEST_TMPDIR across a file with
-#     setup_file() if you want to share installs within a file.
+#   - BUNDLED_REGISTRY_DIR points at the repo's own packages/ dir so
+#     maybe_update_registry is a no-op (no git clone needed).
 
 load '../helpers/common'
+
+setup_file() {
+    export SHED_REPO_ROOT="${BATS_TEST_DIRNAME}/../.."
+    export SHED="${SHED_REPO_ROOT}/shed.sh"
+    export FIXTURES_DIR="${SHED_REPO_ROOT}/tests/fixtures"
+    # Shared SHED_DIR for the whole file so tool installs persist across tests
+    export SHED_DIR="${BATS_FILE_TMPDIR}/shed"
+    export BUNDLED_REGISTRY_DIR="${SHED_REPO_ROOT}/packages"
+    mkdir -p "${SHED_DIR}"
+    # Write a dummy last-checked so maybe_update_registry skips the git pull
+    date +%s > "${SHED_DIR}/last-checked"
+}
+
+teardown_file() {
+    rm -rf "${SHED_DIR}"
+}
 
 setup() {
     export SHED_REPO_ROOT="${BATS_TEST_DIRNAME}/../.."
     export SHED="${SHED_REPO_ROOT}/shed.sh"
     export FIXTURES_DIR="${SHED_REPO_ROOT}/tests/fixtures"
-    setup_test_shed_dir
+    export BUNDLED_REGISTRY_DIR="${SHED_REPO_ROOT}/packages"
 }
 
 teardown() {
-    teardown_test_shed_dir
+    :
 }
 
 # ---------------------------------------------------------------------------

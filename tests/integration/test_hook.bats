@@ -297,7 +297,7 @@ MOCKEOF
     [ -z "$output" ]
 }
 
-@test "hook exits 0 silently when shed binary exits non-zero with no output" {
+@test "hook exits 2 with systemMessage when shed binary exits non-zero with no output" {
     cat > "$HOME/.linter-shed/bin/shed" <<'MOCKEOF'
 #!/usr/bin/env bash
 exit 1
@@ -309,8 +309,8 @@ MOCKEOF
     echo 'import os' > "$tmpfile"
 
     run bash "$HOOK" <<< "$(_build_input "Edit" "$tmpfile")"
-    [ "$status" -eq 0 ]
-    [ -z "$output" ]
+    [ "$status" -eq 2 ]
+    [[ "$output" =~ "systemMessage" ]]
 }
 
 @test "hook exits 0 silently when ok:false but diagnostics array is empty" {
