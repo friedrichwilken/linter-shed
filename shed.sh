@@ -635,7 +635,7 @@ install_tool() {
   installed_version="$(read_installed_version "${tool}")"
 
   if [[ -n "${installed_version}" && "${installed_version}" == "${registry_version}" ]]; then
-    log "${tool}: already up to date (${registry_version})"
+    echo "${tool}: already up to date (${registry_version})"
     return 0
   fi
 

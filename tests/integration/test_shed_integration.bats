@@ -17,15 +17,17 @@ setup_file() {
     export SHED_REPO_ROOT="${BATS_TEST_DIRNAME}/../.."
     export SHED="${SHED_REPO_ROOT}/shed.sh"
     export FIXTURES_DIR="${SHED_REPO_ROOT}/tests/fixtures"
-    export SHED_DIR="${BATS_FILE_TMPDIR}/shed"
     export BUNDLED_REGISTRY_DIR="${SHED_REPO_ROOT}/packages"
     export SHED_QUIET=1
+    # Use ~/.linter-shed so the CI pre-warm step's tool installs are reused.
+    # In local runs this shares the real installation, which is intentional.
+    export SHED_DIR="${HOME}/.linter-shed"
     mkdir -p "${SHED_DIR}"
     date +%s > "${SHED_DIR}/last-checked"
 }
 
 teardown_file() {
-    rm -rf "${SHED_DIR:-/nonexistent}"
+    :
 }
 
 setup() {
@@ -34,8 +36,7 @@ setup() {
     export FIXTURES_DIR="${SHED_REPO_ROOT}/tests/fixtures"
     export BUNDLED_REGISTRY_DIR="${SHED_REPO_ROOT}/packages"
     export SHED_QUIET=1
-    # Re-export SHED_DIR in case setup_file exports didn't propagate
-    export SHED_DIR="${BATS_FILE_TMPDIR}/shed"
+    export SHED_DIR="${HOME}/.linter-shed"
     mkdir -p "${SHED_DIR}"
     if [[ ! -f "${SHED_DIR}/last-checked" ]]; then
         date +%s > "${SHED_DIR}/last-checked"
