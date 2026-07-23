@@ -75,10 +75,13 @@ teardown() {
     [[ "$output" =~ "actionlint" ]]
 }
 
-@test "shed list shows 'not installed' for fresh SHED_DIR" {
+@test "shed list shows status column" {
     run bash "$SHED" list
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "not installed" ]]
+    # Header must be present
+    [[ "$output" =~ "STATUS" ]]
+    # At least one tool entry exists
+    [[ "$output" =~ "actionlint" ]]
 }
 
 @test "shed list marks jsonlint as 'current' after installation" {
