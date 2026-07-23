@@ -1,0 +1,13 @@
+{
+  "name": "linter-shed",
+  "description": "Tool manager and linter runner for Claude Code projects. Install, update, and run linters via a unified shed interface.",
+  "version": "0.1.0",
+  "author": {
+    "name": "friedrichwilken"
+  },
+  "homepage": "https://github.com/friedrichwilken/linter-shed",
+  "repository": "https://github.com/friedrichwilken/linter-shed",
+  "license": "MIT",
+  "hooks": "./hooks/hooks.json",
+  "skills": "./skills"
+}

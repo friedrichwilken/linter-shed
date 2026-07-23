@@ -1,51 +1,99 @@
 #!/usr/bin/env bash
-# hooks/post-edit.sh — Claude Code PostToolUse hook for linter-shed
-#
-# Install by adding to ~/.claude/settings.json hooks:
-#   "PostToolUse": [{
-#     "matcher": "Edit|Write",
-#     "hooks": [{"type": "command", "command": "~/.linter-shed/bin/hooks/post-edit.sh", "async": true}]
-#   }]
+# PostToolUse hook for linter-shed
+# Runs shed check on edited/written files and feeds diagnostics back to Claude.
 
-set -euo pipefail
+# Never fail hard -- linting is best-effort
+set +e
 
-SHED_BIN="${LINTER_SHED_DIR:-$HOME/.linter-shed}/bin"
-SHED="$SHED_BIN/shed"
+# Read full stdin
+INPUT=$(cat)
 
-[[ -x "$SHED" ]] || exit 0
-
-# Claude Code passes tool input as JSON on stdin
-input=$(cat)
-tool_name=$(echo "$input" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('tool_name',''))" 2>/dev/null || true)
+# Extract tool_name and file_path using python3
+TOOL_NAME=$(python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.stdin.read())
+    print(d.get('tool_name', ''))
+except Exception:
+    print('')
+" <<<"$INPUT" 2>/dev/null)
 
 # Only act on Edit and Write
-[[ "$tool_name" == "Edit" || "$tool_name" == "Write" ]] || exit 0
+case "$TOOL_NAME" in
+  Edit|Write) ;;
+  *) exit 0 ;;
+esac
 
-file=$(echo "$input" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-inp = d.get('tool_input', {})
-print(inp.get('file_path', inp.get('path', '')))
-" 2>/dev/null || true)
+FILE_PATH=$(python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.stdin.read())
+    print(d.get('tool_input', {}).get('file_path', ''))
+except Exception:
+    print('')
+" <<<"$INPUT" 2>/dev/null)
 
-[[ -n "$file" && -f "$file" ]] || exit 0
+# Guard: file_path must be non-empty and the file must exist
+if [[ -z "$FILE_PATH" || ! -f "$FILE_PATH" ]]; then
+  exit 0
+fi
 
-result=$("$SHED" check "$file" 2>/dev/null)
-ok=$(echo "$result" | python3 -c "import json,sys; print(json.load(sys.stdin).get('ok', True))" 2>/dev/null || echo "true")
-skipped=$(echo "$result" | python3 -c "import json,sys; print(json.load(sys.stdin).get('skipped', False))" 2>/dev/null || echo "false")
+# Look for shed binary
+SHED_BIN="${HOME}/.linter-shed/bin/shed"
+if [[ ! -x "$SHED_BIN" ]]; then
+  exit 0
+fi
 
-[[ "$skipped" == "True" ]] && exit 0
-[[ "$ok" == "True" ]] && exit 0
+# Run shed check and capture JSON output
+SHED_OUTPUT=$("$SHED_BIN" check "$FILE_PATH" 2>/dev/null)
 
-# Emit diagnostics as a hook feedback message so Claude sees them
-echo "$result" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-diags = data.get('diagnostics', [])
-if not diags:
+# If shed produced no output (unexpected crash), exit silently
+if [[ -z "$SHED_OUTPUT" ]]; then
+  exit 0
+fi
+
+# Parse ok and skipped flags, build diagnostic text.
+# Pipe $SHED_OUTPUT into python3 via echo so the heredoc can supply the script body.
+echo "$SHED_OUTPUT" | python3 - <<'PYEOF'
+import sys, json
+
+raw = sys.stdin.read()
+try:
+    data = json.loads(raw)
+except Exception:
     sys.exit(0)
-print('linter-shed found issues:')
-for d in diags:
-    sev = d.get('severity', 'error').upper()
-    print(f\"  {d['file']}:{d['line']}:{d['col']}: [{sev}] {d['message']}\")
-"
+
+if data.get('ok', False) or data.get('skipped', False):
+    sys.exit(0)
+
+diagnostics = data.get('diagnostics', [])
+if not diagnostics:
+    sys.exit(0)
+
+file_path = diagnostics[0].get('file', '') if diagnostics else ''
+
+lines = []
+for d in diagnostics:
+    severity = d.get('severity', 'error').upper()
+    f = d.get('file', file_path)
+    line = d.get('line', 0)
+    col = d.get('col', 0)
+    msg = d.get('message', '')
+    lines.append(f"  {f}:{line}:{col}: [{severity}] {msg}")
+
+diag_text = '\n'.join(lines)
+count = len(diagnostics)
+
+system_msg = (
+    f"linter-shed found {count} issue(s) in {file_path}:\n"
+    f"{diag_text}\n"
+    "Please fix these issues."
+)
+
+import json as _json
+print(_json.dumps({"systemMessage": system_msg}))
+sys.exit(2)
+PYEOF
+
+# Propagate python3's exit code
+exit $?

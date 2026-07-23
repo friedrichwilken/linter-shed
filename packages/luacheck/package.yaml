@@ -1,0 +1,22 @@
+name: luacheck
+description: Lua static analyser and linter
+source: pkg:github/lunarmodules/luacheck
+version: "1.2.0"
+filetypes:
+  - "*.lua"
+bin:
+  luacheck: luacheck
+platforms:
+  linux/amd64:
+    asset: luacheck
+    binary: .
+  windows/amd64:
+    asset: luacheck.exe
+    binary: .
+  windows/386:
+    asset: luacheck32.exe
+    binary: .
+install_fallback:
+  method: luarocks
+  package: luacheck
+  version: "1.2.0"

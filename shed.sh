@@ -1,452 +1,1555 @@
 #!/usr/bin/env bash
 # shed.sh — linter-shed dispatcher
-# Usage: shed.sh check <file>
-#        shed.sh install <tool>
-#        shed.sh update
-
+# Manages linter installation and execution via a unified interface.
 set -euo pipefail
 
-SHED_DIR="${LINTER_SHED_DIR:-$HOME/.linter-shed}"
-SHED_BIN="$SHED_DIR/bin"
-SHED_REGISTRY="$SHED_DIR/registry"
-SHED_LOCK="$SHED_DIR/shed.lock"
-SHED_LAST_CHECKED="$SHED_DIR/last-checked"
-SHED_REPO="${LINTER_SHED_REPO:-https://github.com/I549741/linter-shed.git}"
-UPDATE_INTERVAL_SECONDS=86400  # 24h
+# ---------------------------------------------------------------------------
+# Constants and paths
+# ---------------------------------------------------------------------------
+SHED_DIR="${SHED_DIR:-${HOME}/.linter-shed}"
+SHED_BIN="${SHED_DIR}/bin"
+REGISTRY_DIR="${SHED_DIR}/registry"
+LOCK_PATH="${SHED_DIR}/shed.lock"
+VERSIONS_DIR="${SHED_DIR}/versions"
+TOOLS_DIR="${SHED_DIR}/tools"
+LAST_CHECKED_PATH="${SHED_DIR}/last-checked"
+REGISTRY_TTL=86400  # 24h in seconds
 
-mkdir -p "$SHED_BIN" "$SHED_REGISTRY"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUNDLED_REGISTRY_DIR="${SCRIPT_DIR}/packages"
 
-# --- helpers -----------------------------------------------------------------
-
-log()  { echo "[shed] $*" >&2; }
-fail() { echo "[shed] error: $*" >&2; exit 1; }
-
-with_lock() {
-    local timeout=5
-    (
-        flock -w "$timeout" 9 || { log "could not acquire lock, skipping"; exit 0; }
-        "$@"
-    ) 9>"$SHED_LOCK"
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+die() {
+  echo "shed: error: $*" >&2
+  exit 1
 }
 
-os_arch() {
-    local os arch
-    os=$(uname -s | tr '[:upper:]' '[:lower:]')
-    arch=$(uname -m)
-    case "$arch" in
-        x86_64)  arch="x64" ;;
-        aarch64|arm64) arch="arm64" ;;
-    esac
-    echo "${os}_${arch}"
+log() {
+  echo "shed: $*" >&2
 }
 
-# --- registry ----------------------------------------------------------------
-
-registry_path() {
-    # If running from the repo itself (dev mode), use packages/ sibling
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    if [[ -d "$script_dir/packages" ]]; then
-        echo "$script_dir/packages"
-    else
-        echo "$SHED_REGISTRY/packages"
-    fi
+# ---------------------------------------------------------------------------
+# Process safety: lock and trap
+# ---------------------------------------------------------------------------
+acquire_lock() {
+  mkdir -p "${SHED_DIR}"
+  exec 9>"${LOCK_PATH}"
+  flock -n 9 || die "shed already running (lock: ${LOCK_PATH})"
 }
 
-maybe_update_registry() {
-    local reg_packages
-    reg_packages="$(registry_path)"
-
-    # If packages dir doesn't exist yet, clone
-    if [[ ! -d "$reg_packages" ]]; then
-        log "cloning registry..."
-        git clone --depth=1 "$SHED_REPO" "$SHED_REGISTRY"
-        date +%s > "$SHED_LAST_CHECKED"
-        return
-    fi
-
-    # Throttle to once per UPDATE_INTERVAL_SECONDS
-    if [[ -f "$SHED_LAST_CHECKED" ]]; then
-        local last now
-        last=$(cat "$SHED_LAST_CHECKED")
-        now=$(date +%s)
-        if (( now - last < UPDATE_INTERVAL_SECONDS )); then
-            return
-        fi
-    fi
-
-    log "checking for registry updates..."
-    git -C "$SHED_REGISTRY" pull --ff-only --quiet 2>/dev/null || true
-    date +%s > "$SHED_LAST_CHECKED"
+release_lock() {
+  flock -u 9 2>/dev/null || true
+  exec 9>&- 2>/dev/null || true
+  rm -f "${LOCK_PATH}"
 }
 
-# --- tool resolution ---------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Version file helpers
+# ---------------------------------------------------------------------------
+read_installed_version() {
+  local tool="$1"
+  local vfile="${VERSIONS_DIR}/${tool}"
+  if [[ -f "${vfile}" ]]; then
+    cat "${vfile}"
+  else
+    echo ""
+  fi
+}
 
-find_tool_for_file() {
-    local file="$1"
-    local reg_packages
-    reg_packages="$(registry_path)"
+write_installed_version() {
+  local tool="$1"
+  local version="$2"
+  mkdir -p "${VERSIONS_DIR}"
+  printf '%s\n' "${version}" > "${VERSIONS_DIR}/${tool}"
+}
 
-    [[ -d "$reg_packages" ]] || fail "registry not found at $reg_packages"
+# ---------------------------------------------------------------------------
+# Registry management
+# ---------------------------------------------------------------------------
+# The registry is the packages/ directory (one YAML per tool).
+# We use Python3 to parse YAML-like package files.
+# Format: simple key: value pairs and indented lists.
 
-    for pkg_yaml in "$reg_packages"/*/package.yaml; do
-        local tool_name filetypes
-        tool_name=$(grep '^name:' "$pkg_yaml" | awk '{print $2}')
+# Parse a package.yaml file into a JSON object using Python3.
+# Usage: parse_package_yaml <filepath>
+parse_package_yaml() {
+  local filepath="$1"
+  python3 - "${filepath}" <<'PYEOF'
+import sys, json, re, os
 
-        # Read filetypes block (simple line-by-line, no yq dependency)
-        local in_filetypes=0
-        while IFS= read -r line; do
-            if [[ "$line" =~ ^filetypes: ]]; then
-                in_filetypes=1
+filepath = sys.argv[1]
+with open(filepath) as f:
+    content = f.read()
+
+result = {}
+current_key = None
+current_list = None
+current_dict_key = None
+current_nested = None
+
+lines = content.splitlines()
+i = 0
+while i < len(lines):
+    line = lines[i]
+    # Skip empty lines and comments
+    if not line.strip() or line.strip().startswith('#'):
+        i += 1
+        continue
+
+    indent = len(line) - len(line.lstrip())
+
+    if indent == 0:
+        # Top-level key: value or key: (list follows)
+        m = re.match(r'^(\w[\w-]*):\s*(.*)', line)
+        if m:
+            current_key = m.group(1)
+            val = m.group(2).strip().strip('"').strip("'")
+            if val:
+                result[current_key] = val
+                current_list = None
+                current_nested = None
+            else:
+                # Will be a list or dict
+                result[current_key] = None
+                current_list = None
+                current_nested = None
+    elif indent == 2:
+        if current_key is None:
+            i += 1
+            continue
+        line_stripped = line.strip()
+        if line_stripped.startswith('- '):
+            # List item
+            val = line_stripped[2:].strip().strip('"').strip("'")
+            if result.get(current_key) is None:
+                result[current_key] = []
+            if isinstance(result[current_key], list):
+                result[current_key].append(val)
+            current_nested = None
+        else:
+            # Nested dict key
+            m = re.match(r'^(\S[\w/.-]*):\s*(.*)', line_stripped)
+            if m:
+                nested_key = m.group(1)
+                nested_val = m.group(2).strip().strip('"').strip("'")
+                if result.get(current_key) is None:
+                    result[current_key] = {}
+                if isinstance(result[current_key], dict):
+                    if nested_val:
+                        result[current_key][nested_key] = nested_val
+                    else:
+                        result[current_key][nested_key] = {}
+                    current_dict_key = nested_key
+                    current_nested = current_key
+    elif indent == 4:
+        if current_nested is None or current_dict_key is None:
+            i += 1
+            continue
+        line_stripped = line.strip()
+        m = re.match(r'^(\S[\w/.-]*):\s*(.*)', line_stripped)
+        if m:
+            k = m.group(1)
+            v = m.group(2).strip().strip('"').strip("'")
+            if isinstance(result.get(current_nested), dict):
+                if isinstance(result[current_nested].get(current_dict_key), dict):
+                    result[current_nested][current_dict_key][k] = v
+    i += 1
+
+print(json.dumps(result))
+PYEOF
+}
+
+# Load all packages from the packages directory into a single JSON registry.
+# Outputs JSON: {"tools": {"toolname": {...}, ...}}
+load_registry() {
+  local pkgs_dir="${1:-${BUNDLED_REGISTRY_DIR}}"
+  python3 - "${pkgs_dir}" <<'PYEOF'
+import sys, json, os, re
+
+pkgs_dir = sys.argv[1]
+registry = {"tools": {}}
+
+for entry in sorted(os.listdir(pkgs_dir)):
+    pkg_file = os.path.join(pkgs_dir, entry, "package.yaml")
+    if not os.path.isfile(pkg_file):
+        continue
+    with open(pkg_file) as f:
+        content = f.read()
+
+    result = {}
+    current_key = None
+    current_dict_key = None
+    current_nested = None
+
+    lines = content.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip() or line.strip().startswith('#'):
+            i += 1
+            continue
+
+        indent = len(line) - len(line.lstrip())
+
+        if indent == 0:
+            m = re.match(r'^(\w[\w-]*):\s*(.*)', line)
+            if m:
+                current_key = m.group(1)
+                val = m.group(2).strip().strip('"').strip("'")
+                if val:
+                    result[current_key] = val
+                    current_nested = None
+                    current_dict_key = None
+                else:
+                    result[current_key] = None
+                    current_nested = None
+                    current_dict_key = None
+        elif indent == 2:
+            if current_key is None:
+                i += 1
                 continue
-            fi
-            if [[ $in_filetypes -eq 1 ]]; then
-                if [[ "$line" =~ ^[a-z] ]]; then
-                    in_filetypes=0
-                    break
-                fi
-                local pattern
-                pattern=$(echo "$line" | sed 's/.*- "//' | sed 's/"//' | tr -d "'" | xargs)
-                if matches_pattern "$file" "$pattern"; then
-                    echo "$tool_name"
-                    return 0
-                fi
-            fi
-        done < "$pkg_yaml"
-    done
+            line_stripped = line.strip()
+            if line_stripped.startswith('- '):
+                val = line_stripped[2:].strip().strip('"').strip("'")
+                if result.get(current_key) is None:
+                    result[current_key] = []
+                if isinstance(result[current_key], list):
+                    result[current_key].append(val)
+                current_nested = None
+                current_dict_key = None
+            else:
+                m = re.match(r'^([\w/.\-]+):\s*(.*)', line_stripped)
+                if m:
+                    nested_key = m.group(1)
+                    nested_val = m.group(2).strip().strip('"').strip("'")
+                    if result.get(current_key) is None:
+                        result[current_key] = {}
+                    if isinstance(result[current_key], dict):
+                        if nested_val:
+                            result[current_key][nested_key] = nested_val
+                        else:
+                            result[current_key][nested_key] = {}
+                        current_dict_key = nested_key
+                        current_nested = current_key
+        elif indent == 4:
+            if current_nested is None or current_dict_key is None:
+                i += 1
+                continue
+            line_stripped = line.strip()
+            m = re.match(r'^([\w/.\-]+):\s*(.*)', line_stripped)
+            if m:
+                k = m.group(1)
+                v = m.group(2).strip().strip('"').strip("'")
+                if isinstance(result.get(current_nested), dict):
+                    if isinstance(result[current_nested].get(current_dict_key), dict):
+                        result[current_nested][current_dict_key][k] = v
+        i += 1
 
-    return 1
+    tool_name = result.get("name", entry)
+    registry["tools"][tool_name] = result
+
+print(json.dumps(registry))
+PYEOF
 }
 
-matches_pattern() {
-    local file="$1" pattern="$2"
-    # Use bash glob matching
-    case "$file" in
-        $pattern) return 0 ;;
-        */$pattern) return 0 ;;
-    esac
-    # Also match basename
-    local base
-    base=$(basename "$file")
-    case "$base" in
-        $pattern) return 0 ;;
-    esac
-    return 1
+# Validate that python3 is available.
+check_python3() {
+  if ! command -v python3 &>/dev/null; then
+    die "python3 is required but not found in PATH"
+  fi
 }
 
-# --- install -----------------------------------------------------------------
+# maybe_update_registry: in dev mode use bundled packages dir; in installed
+# mode refresh from remote if TTL has expired.
+maybe_update_registry() {
+  # Check if running from inside a git repo (dev mode)
+  if git -C "${SCRIPT_DIR}" rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
+    # Dev mode: use bundled packages directory, just update last-checked
+    log "dev mode: using bundled packages at ${BUNDLED_REGISTRY_DIR}"
+    mkdir -p "${SHED_DIR}"
+    date +%s > "${LAST_CHECKED_PATH}"
+    return 0
+  fi
 
-install_tool() {
-    local tool="$1"
-    local reg_packages
-    reg_packages="$(registry_path)"
-    local pkg_yaml="$reg_packages/$tool/package.yaml"
+  # Installed mode: check TTL
+  local now last_checked
+  now="$(date +%s)"
+  if [[ -f "${LAST_CHECKED_PATH}" ]]; then
+    last_checked="$(cat "${LAST_CHECKED_PATH}")"
+  else
+    last_checked=0
+  fi
 
-    [[ -f "$pkg_yaml" ]] || fail "unknown tool: $tool (no package.yaml found)"
+  local elapsed=$(( now - last_checked ))
+  if (( elapsed < REGISTRY_TTL )); then
+    return 0
+  fi
 
-    log "installing $tool..."
+  log "registry TTL expired, updating..."
+  # If registry dir is a git repo, pull; otherwise skip
+  if [[ -d "${REGISTRY_DIR}/.git" ]]; then
+    git -C "${REGISTRY_DIR}" pull --quiet || log "warning: registry pull failed, using cached version"
+  fi
 
-    local source_id
-    source_id=$(grep 'id:' "$pkg_yaml" | head -1 | sed 's/.*id: //' | xargs)
+  printf '%s\n' "${now}" > "${LAST_CHECKED_PATH}"
+}
 
-    if [[ "$source_id" == pkg:npm/* ]]; then
-        local pkg version
-        pkg=$(echo "$source_id" | sed 's|pkg:npm/||' | cut -d@ -f1)
-        version=$(echo "$source_id" | cut -d@ -f2)
-        npm install -g "${pkg}@${version}" --prefix "$SHED_DIR" 2>&1 | tail -3
-        # npm installs to $SHED_DIR/bin automatically
-    elif [[ "$source_id" == pkg:pypi/* ]]; then
-        local pkg version
-        pkg=$(echo "$source_id" | sed 's|pkg:pypi/||' | cut -d@ -f1)
-        version=$(echo "$source_id" | cut -d@ -f2)
-        pip install --quiet "${pkg}==${version}" --target "$SHED_DIR/pylib" 2>&1 | tail -3
-        # Create wrapper in bin
-        cat > "$SHED_BIN/$tool" <<EOF
-#!/usr/bin/env bash
-PYTHONPATH="$SHED_DIR/pylib" exec python3 -m $pkg "\$@"
-EOF
-        chmod +x "$SHED_BIN/$tool"
-    elif [[ "$source_id" == pkg:github/* ]]; then
-        install_github_release "$tool" "$pkg_yaml" "$source_id"
+# Get the packages directory to use (dev: bundled, installed: shed dir)
+get_packages_dir() {
+  if git -C "${SCRIPT_DIR}" rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
+    echo "${BUNDLED_REGISTRY_DIR}"
+  else
+    if [[ -d "${REGISTRY_DIR}" ]]; then
+      echo "${REGISTRY_DIR}"
     else
-        fail "unsupported source type for $tool: $source_id"
+      echo "${BUNDLED_REGISTRY_DIR}"
     fi
-
-    log "$tool installed → $SHED_BIN/$tool"
+  fi
 }
 
-install_github_release() {
-    local tool="$1" pkg_yaml="$2" source_id="$3"
-    local target
-    target=$(os_arch)
+# ---------------------------------------------------------------------------
+# Tool discovery: find_tool_for_file
+# ---------------------------------------------------------------------------
+# Uses Python3 fnmatch to match a file against tool patterns.
+find_tool_for_file() {
+  local file="$1"
+  local pkgs_dir
+  pkgs_dir="$(get_packages_dir)"
 
-    # Find matching asset for current platform
-    local in_asset=0 current_target="" file_template="" bin_name=""
-    while IFS= read -r line; do
-        if [[ "$line" =~ "- target:" ]]; then
-            current_target=$(echo "$line" | sed 's/.*target: //' | xargs)
-            in_asset=1
-        elif [[ $in_asset -eq 1 && "$line" =~ "file:" ]]; then
-            file_template=$(echo "$line" | sed 's/.*file: //' | tr -d '"' | xargs)
-        elif [[ $in_asset -eq 1 && "$line" =~ "bin:" ]]; then
-            bin_name=$(echo "$line" | sed 's/.*bin: //' | xargs)
-            if [[ "$current_target" == "$target" ]]; then
-                break
-            fi
-            in_asset=0
+  python3 - "${file}" "${pkgs_dir}" <<'PYEOF'
+import sys, os, fnmatch, re
+
+filepath = sys.argv[1]
+pkgs_dir = sys.argv[2]
+
+basename = os.path.basename(filepath)
+
+# Ordered list of (tool_name, patterns)
+tools = []
+for entry in sorted(os.listdir(pkgs_dir)):
+    pkg_file = os.path.join(pkgs_dir, entry, "package.yaml")
+    if not os.path.isfile(pkg_file):
+        continue
+    with open(pkg_file) as f:
+        content = f.read()
+
+    name = entry
+    filetypes = []
+    in_filetypes = False
+    for line in content.splitlines():
+        m = re.match(r'^name:\s*(.+)', line)
+        if m:
+            name = m.group(1).strip().strip('"').strip("'")
+        if re.match(r'^filetypes:', line):
+            in_filetypes = True
+            continue
+        if in_filetypes:
+            lstripped = line.strip()
+            if lstripped.startswith('- '):
+                filetypes.append(lstripped[2:].strip().strip('"').strip("'"))
+            elif lstripped and not lstripped.startswith('#'):
+                in_filetypes = False
+
+    tools.append((name, filetypes))
+
+for tool_name, patterns in tools:
+    for pattern in patterns:
+        # Try full path match first (handles absolute path against absolute path)
+        if fnmatch.fnmatch(filepath, pattern):
+            print(tool_name)
+            sys.exit(0)
+        # Try basename match for simple *.ext patterns (e.g. *.yaml, Dockerfile)
+        if fnmatch.fnmatch(basename, pattern):
+            print(tool_name)
+            sys.exit(0)
+        # Try matching path suffix for relative patterns like .github/workflows/*.yaml
+        # Strip any leading **/  then check if the filepath ends with a segment matching the pattern
+        if not pattern.startswith('*'):
+            # Pattern is a relative path like ".github/workflows/*.yaml"
+            # Check if the filepath contains this path as a suffix
+            # We match against every trailing sub-path of filepath
+            parts = filepath.split(os.sep)
+            pattern_parts = pattern.split('/')
+            n = len(pattern_parts)
+            if len(parts) >= n:
+                suffix = os.sep.join(parts[-n:])
+                if fnmatch.fnmatch(suffix, os.sep.join(pattern_parts)):
+                    print(tool_name)
+                    sys.exit(0)
+        # Try **/X style: match basename against the non-glob suffix
+        if '**' in pattern:
+            suffix_pattern = pattern.lstrip('*').lstrip('/')
+            if fnmatch.fnmatch(basename, suffix_pattern):
+                print(tool_name)
+                sys.exit(0)
+
+print("")
+PYEOF
+}
+
+# ---------------------------------------------------------------------------
+# Platform detection
+# ---------------------------------------------------------------------------
+detect_platform() {
+  local os arch
+  case "$(uname -s)" in
+    Linux*)  os="linux" ;;
+    Darwin*) os="darwin" ;;
+    MINGW*|MSYS*|CYGWIN*) os="windows" ;;
+    *) die "unsupported OS: $(uname -s)" ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    i386|i686)    arch="386" ;;
+    *) die "unsupported arch: $(uname -m)" ;;
+  esac
+  echo "${os}/${arch}"
+}
+
+# ---------------------------------------------------------------------------
+# Installation helpers
+# ---------------------------------------------------------------------------
+
+install_npm_tool() {
+  local tool="$1"
+  local package="$2"
+  local version="$3"
+  local tool_dir="${TOOLS_DIR}/${tool}"
+
+  log "installing ${tool}@${version} via npm..."
+  mkdir -p "${tool_dir}"
+  npm install --prefix "${tool_dir}" "${package}@${version}" --save-exact --no-audit --no-fund
+
+  # Symlink all binaries into tool's bin/
+  mkdir -p "${tool_dir}/bin"
+  if [[ -d "${tool_dir}/node_modules/.bin" ]]; then
+    for bin_path in "${tool_dir}/node_modules/.bin/"*; do
+      [[ -e "${bin_path}" ]] || continue
+      local bin_name
+      bin_name="$(basename "${bin_path}")"
+      ln -sf "${bin_path}" "${tool_dir}/bin/${bin_name}"
+    done
+  fi
+
+  # Also symlink to global SHED_BIN
+  mkdir -p "${SHED_BIN}"
+  for bin_path in "${tool_dir}/bin/"*; do
+    [[ -e "${bin_path}" ]] || continue
+    local bin_name
+    bin_name="$(basename "${bin_path}")"
+    ln -sf "${bin_path}" "${SHED_BIN}/${bin_name}"
+  done
+}
+
+install_pip_tool() {
+  local tool="$1"
+  local package="$2"
+  local version="$3"
+  local binary_name="${4:-${tool}}"
+  local tool_dir="${TOOLS_DIR}/${tool}"
+
+  log "installing ${tool}==${version} via pip (venv)..."
+  mkdir -p "${tool_dir}"
+
+  # Create a dedicated venv per tool
+  python3 -m venv "${tool_dir}/venv"
+  "${tool_dir}/venv/bin/pip" install --quiet "${package}==${version}"
+
+  # Symlink binary into tool's bin/
+  mkdir -p "${tool_dir}/bin"
+  local venv_bin="${tool_dir}/venv/bin/${binary_name}"
+  if [[ -f "${venv_bin}" ]]; then
+    ln -sf "${venv_bin}" "${tool_dir}/bin/${binary_name}"
+  else
+    # Try to find any new executables in venv/bin
+    for f in "${tool_dir}/venv/bin/"*; do
+      [[ -x "${f}" && ! -d "${f}" ]] || continue
+      local fname
+      fname="$(basename "${f}")"
+      # Skip python-related executables
+      case "${fname}" in
+        python*|pip*|activate*|easy_install*|wheel*) continue ;;
+      esac
+      ln -sf "${f}" "${tool_dir}/bin/${fname}"
+    done
+  fi
+
+  # Also symlink to global SHED_BIN
+  mkdir -p "${SHED_BIN}"
+  for bin_path in "${tool_dir}/bin/"*; do
+    [[ -e "${bin_path}" ]] || continue
+    local bin_name
+    bin_name="$(basename "${bin_path}")"
+    ln -sf "${bin_path}" "${SHED_BIN}/${bin_name}"
+  done
+}
+
+install_github_tool() {
+  local tool="$1"
+  local version="$2"
+  local asset="$3"
+  local binary_in_archive="$4"  # relative path inside archive, or "." for bare binary
+  local download_url="$5"
+  local tool_dir="${TOOLS_DIR}/${tool}"
+  local bin_name="${6:-${tool}}"
+
+  log "installing ${tool} ${version} from GitHub releases..."
+  mkdir -p "${tool_dir}/bin"
+
+  local tmpdir
+  tmpdir="$(mktemp -d /tmp/shed_install_XXXXXX)"
+  local asset_path="${tmpdir}/${asset}"
+
+  curl -fsSL "${download_url}" -o "${asset_path}"
+
+  # Extract based on extension
+  if [[ "${asset}" == *.tar.gz ]] || [[ "${asset}" == *.tgz ]]; then
+    tar -xzf "${asset_path}" -C "${tmpdir}"
+    if [[ "${binary_in_archive}" == "." ]]; then
+      # bare binary named like the asset without extension
+      local extracted_name="${asset%.tar.gz}"
+      extracted_name="${extracted_name%.tgz}"
+      cp "${tmpdir}/${extracted_name}" "${tool_dir}/bin/${bin_name}" 2>/dev/null \
+        || cp "${tmpdir}/${tool}" "${tool_dir}/bin/${bin_name}" 2>/dev/null \
+        || die "could not find binary in archive ${asset}"
+    else
+      cp "${tmpdir}/${binary_in_archive}" "${tool_dir}/bin/${bin_name}"
+    fi
+  elif [[ "${asset}" == *.zip ]]; then
+    unzip -q "${asset_path}" -d "${tmpdir}"
+    if [[ "${binary_in_archive}" == "." ]]; then
+      local bin_name_in_zip="${asset%.zip}"
+      cp "${tmpdir}/${bin_name_in_zip}" "${tool_dir}/bin/${bin_name}" 2>/dev/null \
+        || cp "${tmpdir}/${tool}" "${tool_dir}/bin/${bin_name}" 2>/dev/null \
+        || die "could not find binary in zip ${asset}"
+    else
+      cp "${tmpdir}/${binary_in_archive}" "${tool_dir}/bin/${bin_name}"
+    fi
+  elif [[ "${asset}" == *.gz ]]; then
+    # Single compressed binary (e.g. taplo)
+    gunzip -c "${asset_path}" > "${tool_dir}/bin/${bin_name}"
+  else
+    # Bare binary (e.g. hadolint)
+    cp "${asset_path}" "${tool_dir}/bin/${bin_name}"
+  fi
+
+  chmod +x "${tool_dir}/bin/${bin_name}"
+  rm -rf "${tmpdir}"
+
+  # Symlink to global SHED_BIN
+  mkdir -p "${SHED_BIN}"
+  ln -sf "${tool_dir}/bin/${bin_name}" "${SHED_BIN}/${bin_name}"
+}
+
+# Build the GitHub release download URL for a tool
+github_release_url() {
+  local source="$1"   # e.g. pkg:github/rhysd/actionlint
+  local version="$2"  # e.g. 1.7.12
+  local asset="$3"
+
+  # Extract org/repo from pkg:github/org/repo
+  local repo_path="${source#pkg:github/}"
+  local org="${repo_path%%/*}"
+  local repo="${repo_path##*/}"
+
+  echo "https://github.com/${org}/${repo}/releases/download/v${version}/${asset}"
+}
+
+# Some tools use different tag formats (no v prefix, etc.)
+# actionlint uses v prefix, shellcheck uses v prefix, hadolint uses v prefix
+# golangci-lint uses v prefix
+# taplo uses v prefix
+# ruff uses v prefix
+# luacheck: no GitHub release for all platforms; handled separately
+
+# Get asset and binary for current platform from tool info JSON
+get_platform_asset() {
+  local tool_json="$1"
+  local platform="$2"
+
+  python3 - "${tool_json}" "${platform}" <<'PYEOF'
+import sys, json
+
+tool_json = sys.argv[1]
+platform = sys.argv[2]
+
+tool = json.loads(tool_json)
+platforms = tool.get("platforms", {})
+
+if platform in platforms:
+    p = platforms[platform]
+    print(json.dumps({"asset": p.get("asset",""), "binary": p.get("binary",".")}))
+    sys.exit(0)
+
+print("{}")
+PYEOF
+}
+
+# Install a tool based on its source type
+install_tool() {
+  local tool="$1"
+  local pkgs_dir
+  pkgs_dir="$(get_packages_dir)"
+
+  local pkg_file="${pkgs_dir}/${tool}/package.yaml"
+  [[ -f "${pkg_file}" ]] || die "unknown tool: ${tool}"
+
+  local tool_json
+  tool_json="$(parse_package_yaml "${pkg_file}")"
+
+  local registry_version
+  registry_version="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d.get('version',''))" "${tool_json}")"
+
+  local installed_version
+  installed_version="$(read_installed_version "${tool}")"
+
+  if [[ -n "${installed_version}" && "${installed_version}" == "${registry_version}" ]]; then
+    log "${tool}: already up to date (${registry_version})"
+    return 0
+  fi
+
+  if [[ -n "${installed_version}" && "${installed_version}" != "${registry_version}" ]]; then
+    log "${tool}: upgrading from ${installed_version} to ${registry_version}"
+    # Remove old installation
+    rm -rf "${TOOLS_DIR}/${tool}"
+  fi
+
+  local source
+  source="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d.get('source',''))" "${tool_json}")"
+
+  case "${source}" in
+    pkg:npm/*)
+      local package="${source#pkg:npm/}"
+      install_npm_tool "${tool}" "${package}" "${registry_version}"
+      ;;
+
+    pkg:pypi/*)
+      local package="${source#pkg:pypi/}"
+      local binary_name
+      binary_name="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); b=d.get('bin',{}); print(list(b.keys())[0] if b else sys.argv[2])" "${tool_json}" "${tool}")"
+      install_pip_tool "${tool}" "${package}" "${registry_version}" "${binary_name}"
+      ;;
+
+    pkg:github/*)
+      local platform
+      platform="$(detect_platform)"
+
+      local platform_info
+      platform_info="$(get_platform_asset "${tool_json}" "${platform}")"
+
+      if [[ "${platform_info}" == "{}" ]]; then
+        # Check for install_fallback
+        local fallback_method
+        fallback_method="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d.get('install_fallback',{}).get('method',''))" "${tool_json}")"
+        if [[ "${fallback_method}" == "luarocks" ]]; then
+          local pkg
+          pkg="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d.get('install_fallback',{}).get('package',''))" "${tool_json}")"
+          local ver
+          ver="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d.get('install_fallback',{}).get('version',''))" "${tool_json}")"
+          log "installing ${tool} via luarocks..."
+          luarocks install "${pkg}" "${ver}" --local || die "luarocks install failed for ${tool}"
+          # luarocks installs to ~/.luarocks/bin
+          local luarocks_bin="${HOME}/.luarocks/bin"
+          mkdir -p "${TOOLS_DIR}/${tool}/bin" "${SHED_BIN}"
+          ln -sf "${luarocks_bin}/${tool}" "${TOOLS_DIR}/${tool}/bin/${tool}"
+          ln -sf "${luarocks_bin}/${tool}" "${SHED_BIN}/${tool}"
+        else
+          die "no package available for platform ${platform} and tool ${tool}"
         fi
-    done < "$pkg_yaml"
+      else
+        local asset binary_in_archive
+        asset="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d['asset'])" "${platform_info}")"
+        binary_in_archive="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d['binary'])" "${platform_info}")"
 
-    [[ -n "$file_template" ]] || fail "no asset found for platform $target in $tool"
+        local bin_name
+        bin_name="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); b=d.get('bin',{}); print(list(b.keys())[0] if b else sys.argv[2])" "${tool_json}" "${tool}")"
 
-    local repo version
-    repo=$(echo "$source_id" | sed 's|pkg:github/||' | cut -d@ -f1)
-    version=$(echo "$source_id" | cut -d@ -f2 | sed 's/^v//')
-    local file
-    file=$(echo "$file_template" | sed "s/{{version}}/v${version}/g")
+        local download_url
+        download_url="$(github_release_url "${source}" "${registry_version}" "${asset}")"
 
-    local url="https://github.com/${repo}/releases/download/v${version}/${file}"
-    local tmpdir
-    tmpdir=$(mktemp -d)
+        install_github_tool "${tool}" "${registry_version}" "${asset}" "${binary_in_archive}" "${download_url}" "${bin_name}"
+      fi
+      ;;
 
-    log "downloading $file..."
-    curl -fsSL "$url" -o "$tmpdir/$file"
+    *)
+      die "unsupported source type for ${tool}: ${source}"
+      ;;
+  esac
 
-    if [[ "$file" == *.tar.gz || "$file" == *.tar.xz ]]; then
-        tar -xf "$tmpdir/$file" -C "$tmpdir"
-    elif [[ "$file" == *.zip ]]; then
-        unzip -q "$tmpdir/$file" -d "$tmpdir"
-    fi
+  # Capture actual installed version -- strip tool-name prefix to store bare version number.
+  # e.g. "ruff 0.11.13" -> "0.11.13", "actionlint 1.7.12" -> "1.7.12"
+  local actual_version="${registry_version}"
+  local tool_bin="${TOOLS_DIR}/${tool}/bin/${tool}"
+  if [[ -x "${tool_bin}" ]]; then
+    actual_version="$("${tool_bin}" --version 2>&1 | head -1 \
+      | grep -oE '[0-9]+\.[0-9]+[^ ]*' | head -1 \
+      || echo "${registry_version}")"
+    # Fall back to registry_version if grep found nothing
+    [[ -n "${actual_version}" ]] || actual_version="${registry_version}"
+  fi
 
-    local bin_path
-    bin_path=$(find "$tmpdir" -name "$bin_name" -type f | head -1)
-    [[ -n "$bin_path" ]] || fail "binary $bin_name not found in archive"
-
-    install -m 0755 "$bin_path" "$SHED_BIN/$tool"
-    rm -rf "$tmpdir"
+  write_installed_version "${tool}" "${actual_version}"
+  log "${tool} ${actual_version}: installed successfully"
 }
 
-is_installed() {
-    local tool="$1"
-    [[ -x "$SHED_BIN/$tool" ]] || command -v "$tool" &>/dev/null
-}
-
-ensure_installed() {
-    local tool="$1"
-    if ! is_installed "$tool"; then
-        with_lock install_tool "$tool"
-    fi
-}
-
-# --- run & parse -------------------------------------------------------------
-
+# ---------------------------------------------------------------------------
+# Linting execution
+# ---------------------------------------------------------------------------
 run_linter() {
-    local tool="$1" file="$2"
-    local output exit_code=0
+  local tool="$1"
+  local file="$2"
+  local pkgs_dir
+  pkgs_dir="$(get_packages_dir)"
 
-    # Ensure bin dir is on PATH
-    export PATH="$SHED_BIN:$PATH"
+  local tool_dir="${TOOLS_DIR}/${tool}"
+  export PATH="${tool_dir}/bin:${SHED_BIN}:${PATH}"
 
-    case "$tool" in
-        jsonlint)
-            output=$(jsonlint --compact "$file" 2>&1) || exit_code=$?
-            parse_jsonlint "$file" "$output" "$exit_code"
-            ;;
-        yamllint)
-            output=$(yamllint -f parsable "$file" 2>&1) || exit_code=$?
-            parse_yamllint "$file" "$output" "$exit_code"
-            ;;
-        shellcheck)
-            output=$(shellcheck -f json "$file" 2>&1) || exit_code=$?
-            parse_shellcheck "$output" "$exit_code"
-            ;;
-        actionlint)
-            output=$(actionlint -format '{{range $e := .}}{{$e.Filepath}}:{{$e.Line}}:{{$e.Col}}:error:{{$e.Message}}\n{{end}}' "$file" 2>&1) || exit_code=$?
-            parse_generic "$file" "$output" "$exit_code"
-            ;;
-        ruff)
-            output=$(ruff check --output-format=json "$file" 2>&1) || exit_code=$?
-            parse_ruff "$output" "$exit_code"
-            ;;
-        *)
-            fail "no parser for tool: $tool"
-            ;;
-    esac
+  # Determine parse_format from tool name (hardcoded knowledge per spec)
+  local parse_format
+  parse_format="$(get_parse_format "${tool}")"
+
+  # Build run command and capture output
+  local stdout_file stderr_file exit_code
+  stdout_file="$(mktemp /tmp/shed_stdout_XXXXXX)"
+  stderr_file="$(mktemp /tmp/shed_stderr_XXXXXX)"
+
+  local tool_bin="${tool_dir}/bin/${tool}"
+
+  set +e
+  case "${tool}" in
+    yamllint)
+      "${tool_bin}" -f parsable "${file}" > "${stdout_file}" 2>"${stderr_file}"
+      exit_code=$?
+      ;;
+    eslint)
+      "${tool_bin}" --format json "${file}" > "${stdout_file}" 2>"${stderr_file}"
+      exit_code=$?
+      ;;
+    prettier)
+      # --check exits 0 when formatted, 1 when needs formatting, 2 on error
+      "${tool_bin}" --check "${file}" > "${stdout_file}" 2>"${stderr_file}"
+      exit_code=$?
+      ;;
+    ruff)
+      "${tool_bin}" check --output-format json "${file}" > "${stdout_file}" 2>"${stderr_file}"
+      exit_code=$?
+      ;;
+    shellcheck)
+      "${tool_bin}" --format=json "${file}" > "${stdout_file}" 2>"${stderr_file}"
+      exit_code=$?
+      ;;
+    actionlint)
+      "${tool_bin}" -format '{{json .}}' "${file}" > "${stdout_file}" 2>"${stderr_file}"
+      exit_code=$?
+      ;;
+    jsonlint)
+      "${tool_bin}" "${file}" > "${stdout_file}" 2>"${stderr_file}"
+      exit_code=$?
+      ;;
+    markdownlint-cli2)
+      "${tool_bin}" --config /dev/null "${file}" > "${stdout_file}" 2>"${stderr_file}"
+      exit_code=$?
+      ;;
+    hadolint)
+      "${tool_bin}" --format json "${file}" > "${stdout_file}" 2>"${stderr_file}"
+      exit_code=$?
+      ;;
+    golangci-lint)
+      "${tool_bin}" run --out-format json "${file}" > "${stdout_file}" 2>"${stderr_file}"
+      exit_code=$?
+      ;;
+    taplo)
+      "${tool_bin}" lint "${file}" > "${stdout_file}" 2>"${stderr_file}"
+      exit_code=$?
+      ;;
+    luacheck)
+      "${tool_bin}" --formatter plain "${file}" > "${stdout_file}" 2>"${stderr_file}"
+      exit_code=$?
+      ;;
+    *)
+      "${tool_bin}" "${file}" > "${stdout_file}" 2>"${stderr_file}"
+      exit_code=$?
+      ;;
+  esac
+  set -e
+
+  parse_output "${tool}" "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}"
+  rm -f "${stdout_file}" "${stderr_file}"
 }
 
-parse_jsonlint() {
-    local file="$1" output="$2" exit_code="$3"
-    if [[ $exit_code -eq 0 ]]; then
-        echo '{"ok":true,"diagnostics":[]}'
-        return
-    fi
-    # jsonlint output: "Error: Parse error on line N: ..."
-    local line msg
-    line=$(echo "$output" | grep -oP 'line \K[0-9]+' | head -1)
-    msg=$(echo "$output" | head -1)
-    printf '{"ok":false,"diagnostics":[{"file":"%s","line":%s,"col":1,"severity":"error","message":"%s"}]}\n' \
-        "$file" "${line:-1}" "$(echo "$msg" | sed 's/"/\\"/g')"
+get_parse_format() {
+  local tool="$1"
+  case "${tool}" in
+    yamllint)      echo "yamllint" ;;
+    eslint)        echo "eslint" ;;
+    prettier)      echo "prettier" ;;
+    ruff)          echo "ruff_json" ;;
+    shellcheck)    echo "shellcheck_json" ;;
+    actionlint)    echo "actionlint_json" ;;
+    jsonlint)      echo "jsonlint" ;;
+    markdownlint-cli2) echo "markdownlint" ;;
+    hadolint)      echo "hadolint_json" ;;
+    golangci-lint) echo "golangci_json" ;;
+    taplo)         echo "taplo" ;;
+    luacheck)      echo "luacheck" ;;
+    *)             echo "generic" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Output parsing
+# ---------------------------------------------------------------------------
+parse_output() {
+  local tool="$1"
+  local file="$2"
+  local stdout_file="$3"
+  local stderr_file="$4"
+  local exit_code="$5"
+
+  local format
+  format="$(get_parse_format "${tool}")"
+
+  case "${format}" in
+    yamllint)         parse_yamllint "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" ;;
+    eslint)           parse_eslint "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" ;;
+    prettier)         parse_prettier "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" ;;
+    ruff_json)        parse_ruff_json "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" ;;
+    shellcheck_json)  parse_shellcheck_json "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" ;;
+    actionlint_json)  parse_actionlint_json "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" ;;
+    jsonlint)         parse_jsonlint "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" ;;
+    markdownlint)     parse_markdownlint "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" ;;
+    hadolint_json)    parse_hadolint_json "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" ;;
+    golangci_json)    parse_golangci_json "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" ;;
+    taplo)            parse_taplo "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" ;;
+    luacheck)         parse_luacheck "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" ;;
+    *)                parse_generic "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" ;;
+  esac
 }
 
 parse_yamllint() {
-    local file="$1" output="$2" exit_code="$3"
-    if [[ $exit_code -eq 0 ]]; then
-        echo '{"ok":true,"diagnostics":[]}'
-        return
-    fi
-    # parsable format: file:line:col: [level] message
-    local diags="[]"
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        local f l c sev msg
-        f=$(echo "$line" | cut -d: -f1)
-        l=$(echo "$line" | cut -d: -f2)
-        c=$(echo "$line" | cut -d: -f3)
-        sev=$(echo "$line" | grep -oP '\[(error|warning)\]' | tr -d '[]')
-        msg=$(echo "$line" | sed 's/.*\[.*\] //' | sed 's/"/\\"/g')
-        diags=$(echo "$diags" | sed "s/\]$/,{\"file\":\"$f\",\"line\":$l,\"col\":$c,\"severity\":\"${sev:-error}\",\"message\":\"$msg\"}]/")
-    done <<< "$output"
-    diags=$(echo "$diags" | sed 's/^\[,/[/')
-    printf '{"ok":false,"diagnostics":%s}\n' "$diags"
+  local file="$1" stdout_file="$2" stderr_file="$3" exit_code="$4"
+  python3 - "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" <<'PYEOF'
+import sys, json, re
+
+file = sys.argv[1]
+stdout = open(sys.argv[2]).read()
+stderr = open(sys.argv[3]).read()
+exit_code = int(sys.argv[4])
+
+findings = []
+error = None
+
+if exit_code >= 2:
+    error = stderr.strip() or stdout.strip()
+else:
+    pattern = re.compile(r'^.+?:(\d+):(\d+): \[(error|warning)\] (.+?) \((.+?)\)$')
+    for line in stdout.splitlines():
+        m = pattern.match(line)
+        if m:
+            findings.append({
+                "file": file,
+                "line": int(m.group(1)),
+                "col": int(m.group(2)),
+                "severity": m.group(3),
+                "message": m.group(4),
+                "rule": m.group(5)
+            })
+
+result = {
+    "ok": len(findings) == 0 and error is None,
+    "diagnostics": findings,
+    "error": error
+}
+print(json.dumps(result))
+PYEOF
 }
 
-parse_shellcheck() {
-    local output="$1" exit_code="$2"
-    if [[ $exit_code -eq 0 ]]; then
-        echo '{"ok":true,"diagnostics":[]}'
-        return
-    fi
-    # shellcheck -f json already outputs JSON array
-    local diags
-    diags=$(echo "$output" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-out = []
-for d in data:
-    out.append({
-        'file': d.get('file',''),
-        'line': d.get('line', 1),
-        'col': d.get('column', 1),
-        'severity': d.get('level', 'error'),
-        'message': d.get('message','')
+parse_eslint() {
+  local file="$1" stdout_file="$2" stderr_file="$3" exit_code="$4"
+  python3 - "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" <<'PYEOF'
+import sys, json
+
+file = sys.argv[1]
+stdout = open(sys.argv[2]).read()
+stderr = open(sys.argv[3]).read()
+exit_code = int(sys.argv[4])
+
+if exit_code >= 2:
+    result = {"ok": False, "diagnostics": [], "error": stderr.strip() or stdout.strip()}
+else:
+    try:
+        eslint_out = json.loads(stdout) if stdout.strip() else []
+    except json.JSONDecodeError:
+        result = {"ok": False, "diagnostics": [], "error": stdout.strip()}
+        print(json.dumps(result))
+        sys.exit(0)
+
+    findings = []
+    for file_result in eslint_out:
+        for msg in file_result.get("messages", []):
+            findings.append({
+                "file": file_result.get("filePath", file),
+                "line": msg.get("line", 0),
+                "col": msg.get("column", 0),
+                "severity": "error" if msg.get("severity") == 2 else "warning",
+                "message": msg.get("message", ""),
+                "rule": msg.get("ruleId", "") or ""
+            })
+    result = {"ok": len(findings) == 0, "diagnostics": findings, "error": None}
+
+print(json.dumps(result))
+PYEOF
+}
+
+parse_prettier() {
+  local file="$1" stdout_file="$2" stderr_file="$3" exit_code="$4"
+  python3 - "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" <<'PYEOF'
+import sys, json
+
+file = sys.argv[1]
+stdout = open(sys.argv[2]).read()
+stderr = open(sys.argv[3]).read()
+exit_code = int(sys.argv[4])
+
+# prettier --check exits 1 when formatting is needed, 2 on error
+if exit_code >= 2:
+    result = {"ok": False, "diagnostics": [], "error": stderr.strip() or stdout.strip()}
+elif exit_code == 1:
+    # File needs formatting
+    findings = [{
+        "file": file,
+        "line": 0,
+        "col": 0,
+        "severity": "warning",
+        "message": "File is not formatted by prettier",
+        "rule": "format"
+    }]
+    result = {"ok": False, "diagnostics": findings, "error": None}
+else:
+    result = {"ok": True, "diagnostics": [], "error": None}
+
+print(json.dumps(result))
+PYEOF
+}
+
+parse_ruff_json() {
+  local file="$1" stdout_file="$2" stderr_file="$3" exit_code="$4"
+  python3 - "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" <<'PYEOF'
+import sys, json
+
+file = sys.argv[1]
+stdout = open(sys.argv[2]).read()
+stderr = open(sys.argv[3]).read()
+exit_code = int(sys.argv[4])
+
+if exit_code >= 2:
+    result = {"ok": False, "diagnostics": [], "error": stderr.strip() or stdout.strip()}
+else:
+    try:
+        ruff_out = json.loads(stdout) if stdout.strip() else []
+    except json.JSONDecodeError:
+        result = {"ok": False, "diagnostics": [], "error": stdout.strip()}
+        print(json.dumps(result))
+        sys.exit(0)
+
+    findings = []
+    for item in ruff_out:
+        loc = item.get("location", {})
+        findings.append({
+            "file": item.get("filename", file),
+            "line": loc.get("row", 0),
+            "col": loc.get("column", 0),
+            "severity": "error" if item.get("fix") is None else "warning",
+            "message": item.get("message", ""),
+            "rule": item.get("code", "") or ""
+        })
+    result = {"ok": len(findings) == 0, "diagnostics": findings, "error": None}
+
+print(json.dumps(result))
+PYEOF
+}
+
+parse_shellcheck_json() {
+  local file="$1" stdout_file="$2" stderr_file="$3" exit_code="$4"
+  python3 - "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" <<'PYEOF'
+import sys, json
+
+file = sys.argv[1]
+stdout = open(sys.argv[2]).read()
+stderr = open(sys.argv[3]).read()
+exit_code = int(sys.argv[4])
+
+if exit_code >= 2:
+    result = {"ok": False, "diagnostics": [], "error": stderr.strip() or stdout.strip()}
+else:
+    try:
+        sc_out = json.loads(stdout) if stdout.strip() else []
+    except json.JSONDecodeError:
+        result = {"ok": False, "diagnostics": [], "error": stdout.strip()}
+        print(json.dumps(result))
+        sys.exit(0)
+
+    findings = []
+    for item in sc_out:
+        sev = item.get("level", "warning")
+        if sev == "info":
+            sev = "warning"
+        findings.append({
+            "file": item.get("file", file),
+            "line": item.get("line", 0),
+            "col": item.get("column", 0),
+            "severity": sev,
+            "message": item.get("message", ""),
+            "rule": "SC" + str(item.get("code", "")) if item.get("code") else ""
+        })
+    result = {"ok": len(findings) == 0, "diagnostics": findings, "error": None}
+
+print(json.dumps(result))
+PYEOF
+}
+
+parse_actionlint_json() {
+  local file="$1" stdout_file="$2" stderr_file="$3" exit_code="$4"
+  python3 - "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" <<'PYEOF'
+import sys, json
+
+file = sys.argv[1]
+stdout = open(sys.argv[2]).read()
+stderr = open(sys.argv[3]).read()
+exit_code = int(sys.argv[4])
+
+if exit_code >= 2:
+    result = {"ok": False, "diagnostics": [], "error": stderr.strip() or stdout.strip()}
+else:
+    try:
+        al_out = json.loads(stdout) if stdout.strip() else []
+    except json.JSONDecodeError:
+        result = {"ok": False, "diagnostics": [], "error": stdout.strip()}
+        print(json.dumps(result))
+        sys.exit(0)
+
+    # actionlint -format '{{json .}}' returns array of error objects
+    findings = []
+    if isinstance(al_out, list):
+        items = al_out
+    else:
+        items = [al_out]
+    for item in items:
+        pos = item.get("filepath", file)
+        line = item.get("line", 0)
+        col = item.get("column", 0)
+        msg = item.get("message", "")
+        kind = item.get("kind", "")
+        findings.append({
+            "file": pos,
+            "line": line,
+            "col": col,
+            "severity": "error",
+            "message": msg,
+            "rule": kind
+        })
+    result = {"ok": len(findings) == 0, "diagnostics": findings, "error": None}
+
+print(json.dumps(result))
+PYEOF
+}
+
+parse_jsonlint() {
+  local file="$1" stdout_file="$2" stderr_file="$3" exit_code="$4"
+  python3 - "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" <<'PYEOF'
+import sys, json, re
+
+file = sys.argv[1]
+stdout = open(sys.argv[2]).read()
+stderr = open(sys.argv[3]).read()
+exit_code = int(sys.argv[4])
+
+findings = []
+error = None
+
+if exit_code != 0:
+    # jsonlint outputs errors to stderr: "Error: ... at line N column M"
+    combined = (stderr.strip() or stdout.strip())
+    m = re.search(r'line (\d+)', combined)
+    m2 = re.search(r'column (\d+)', combined)
+    line = int(m.group(1)) if m else 0
+    col = int(m2.group(1)) if m2 else 0
+    findings.append({
+        "file": file,
+        "line": line,
+        "col": col,
+        "severity": "error",
+        "message": combined.split('\n')[0],
+        "rule": "syntax"
     })
-print(json.dumps(out))
-")
-    printf '{"ok":false,"diagnostics":%s}\n' "$diags"
+
+result = {"ok": len(findings) == 0, "diagnostics": findings, "error": error}
+print(json.dumps(result))
+PYEOF
+}
+
+parse_markdownlint() {
+  local file="$1" stdout_file="$2" stderr_file="$3" exit_code="$4"
+  python3 - "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" <<'PYEOF'
+import sys, json, re
+
+file = sys.argv[1]
+stdout = open(sys.argv[2]).read()
+stderr = open(sys.argv[3]).read()
+exit_code = int(sys.argv[4])
+
+findings = []
+error = None
+
+if exit_code >= 2:
+    error = stderr.strip() or stdout.strip()
+else:
+    # markdownlint-cli2 output: filepath:line ruleName/aliases message [context]
+    pattern = re.compile(r'^.+?:(\d+)(?::(\d+))? ([\w-]+/[\w -]+?) (.+)$')
+    for line in (stdout + "\n" + stderr).splitlines():
+        m = pattern.match(line.strip())
+        if m:
+            findings.append({
+                "file": file,
+                "line": int(m.group(1)),
+                "col": int(m.group(2)) if m.group(2) else 0,
+                "severity": "error",
+                "message": m.group(4).strip(),
+                "rule": m.group(3).strip()
+            })
+
+result = {"ok": len(findings) == 0 and error is None, "diagnostics": findings, "error": error}
+print(json.dumps(result))
+PYEOF
+}
+
+parse_hadolint_json() {
+  local file="$1" stdout_file="$2" stderr_file="$3" exit_code="$4"
+  python3 - "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" <<'PYEOF'
+import sys, json
+
+file = sys.argv[1]
+stdout = open(sys.argv[2]).read()
+stderr = open(sys.argv[3]).read()
+exit_code = int(sys.argv[4])
+
+if exit_code >= 2:
+    result = {"ok": False, "diagnostics": [], "error": stderr.strip() or stdout.strip()}
+else:
+    try:
+        hd_out = json.loads(stdout) if stdout.strip() else []
+    except json.JSONDecodeError:
+        result = {"ok": False, "diagnostics": [], "error": stdout.strip()}
+        print(json.dumps(result))
+        sys.exit(0)
+
+    findings = []
+    for item in hd_out:
+        sev = item.get("level", "warning").lower()
+        if sev not in ("error", "warning", "info"):
+            sev = "warning"
+        findings.append({
+            "file": item.get("file", file),
+            "line": item.get("line", 0),
+            "col": item.get("column", 0),
+            "severity": sev,
+            "message": item.get("message", ""),
+            "rule": item.get("code", "") or ""
+        })
+    result = {"ok": len(findings) == 0, "diagnostics": findings, "error": None}
+
+print(json.dumps(result))
+PYEOF
+}
+
+parse_golangci_json() {
+  local file="$1" stdout_file="$2" stderr_file="$3" exit_code="$4"
+  python3 - "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" <<'PYEOF'
+import sys, json
+
+file = sys.argv[1]
+stdout = open(sys.argv[2]).read()
+stderr = open(sys.argv[3]).read()
+exit_code = int(sys.argv[4])
+
+if exit_code >= 2:
+    result = {"ok": False, "diagnostics": [], "error": stderr.strip() or stdout.strip()}
+else:
+    try:
+        gc_out = json.loads(stdout) if stdout.strip() else {}
+    except json.JSONDecodeError:
+        result = {"ok": False, "diagnostics": [], "error": stdout.strip()}
+        print(json.dumps(result))
+        sys.exit(0)
+
+    findings = []
+    for issue in gc_out.get("Issues", []) or []:
+        pos = issue.get("Pos", {})
+        findings.append({
+            "file": pos.get("Filename", file),
+            "line": pos.get("Line", 0),
+            "col": pos.get("Column", 0),
+            "severity": "error",
+            "message": issue.get("Text", ""),
+            "rule": issue.get("FromLinter", "") or ""
+        })
+    result = {"ok": len(findings) == 0, "diagnostics": findings, "error": None}
+
+print(json.dumps(result))
+PYEOF
+}
+
+parse_taplo() {
+  local file="$1" stdout_file="$2" stderr_file="$3" exit_code="$4"
+  python3 - "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" <<'PYEOF'
+import sys, json, re
+
+file = sys.argv[1]
+stdout = open(sys.argv[2]).read()
+stderr = open(sys.argv[3]).read()
+exit_code = int(sys.argv[4])
+
+findings = []
+error = None
+
+if exit_code >= 2:
+    error = stderr.strip() or stdout.strip()
+else:
+    # taplo lint output: error: message\n  --> file:line:col
+    combined = stdout + "\n" + stderr
+    pattern = re.compile(r'^(error|warning|note):\s*(.+)', re.IGNORECASE)
+    loc_pattern = re.compile(r'-->\s*.+:(\d+):(\d+)')
+    lines = combined.splitlines()
+    i = 0
+    while i < len(lines):
+        m = pattern.match(lines[i].strip())
+        if m:
+            sev = m.group(1).lower()
+            if sev == "note":
+                sev = "warning"
+            msg = m.group(2)
+            line_num = 0
+            col_num = 0
+            if i + 1 < len(lines):
+                lm = loc_pattern.search(lines[i + 1])
+                if lm:
+                    line_num = int(lm.group(1))
+                    col_num = int(lm.group(2))
+                    i += 1
+            findings.append({
+                "file": file,
+                "line": line_num,
+                "col": col_num,
+                "severity": sev,
+                "message": msg,
+                "rule": ""
+            })
+        i += 1
+
+result = {"ok": len(findings) == 0 and error is None, "diagnostics": findings, "error": error}
+print(json.dumps(result))
+PYEOF
+}
+
+parse_luacheck() {
+  local file="$1" stdout_file="$2" stderr_file="$3" exit_code="$4"
+  python3 - "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" <<'PYEOF'
+import sys, json, re
+
+file = sys.argv[1]
+stdout = open(sys.argv[2]).read()
+stderr = open(sys.argv[3]).read()
+exit_code = int(sys.argv[4])
+
+findings = []
+error = None
+
+if exit_code >= 2 and not stdout.strip():
+    error = stderr.strip() or "luacheck error"
+else:
+    # luacheck plain: filepath:line:col-col: (WN) message
+    pattern = re.compile(r'^.+?:(\d+):(\d+)-\d+: \(([EW]\d+)\) (.+)$')
+    for line in stdout.splitlines():
+        m = pattern.match(line.strip())
+        if m:
+            code = m.group(3)
+            sev = "error" if code.startswith("E") else "warning"
+            findings.append({
+                "file": file,
+                "line": int(m.group(1)),
+                "col": int(m.group(2)),
+                "severity": sev,
+                "message": m.group(4),
+                "rule": code
+            })
+
+result = {"ok": len(findings) == 0 and error is None, "diagnostics": findings, "error": error}
+print(json.dumps(result))
+PYEOF
 }
 
 parse_generic() {
-    local file="$1" output="$2" exit_code="$3"
-    if [[ $exit_code -eq 0 ]]; then
-        echo '{"ok":true,"diagnostics":[]}'
-        return
-    fi
-    # file:line:col:severity:message
-    local diags="[]"
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        local f l c sev msg
-        f=$(echo "$line" | cut -d: -f1)
-        l=$(echo "$line" | cut -d: -f2)
-        c=$(echo "$line" | cut -d: -f3)
-        sev=$(echo "$line" | cut -d: -f4)
-        msg=$(echo "$line" | cut -d: -f5- | sed 's/"/\\"/g')
-        diags=$(echo "$diags" | sed "s/\]$/,{\"file\":\"$f\",\"line\":$l,\"col\":$c,\"severity\":\"${sev:-error}\",\"message\":\"$msg\"}]/")
-    done <<< "$output"
-    diags=$(echo "$diags" | sed 's/^\[,/[/')
-    printf '{"ok":false,"diagnostics":%s}\n' "$diags"
+  local file="$1" stdout_file="$2" stderr_file="$3" exit_code="$4"
+  python3 - "${file}" "${stdout_file}" "${stderr_file}" "${exit_code}" <<'PYEOF'
+import sys, json
+
+file = sys.argv[1]
+stdout = open(sys.argv[2]).read()
+stderr = open(sys.argv[3]).read()
+exit_code = int(sys.argv[4])
+
+error = None
+if exit_code >= 2:
+    error = stderr.strip() or stdout.strip()
+    result = {"ok": False, "diagnostics": [], "error": error}
+else:
+    findings = []
+    for line in stdout.splitlines():
+        if line.strip():
+            findings.append({
+                "file": file,
+                "line": 0,
+                "col": 0,
+                "severity": "warning",
+                "message": line,
+                "rule": ""
+            })
+    result = {"ok": len(findings) == 0, "diagnostics": findings, "error": None}
+
+print(json.dumps(result))
+PYEOF
 }
 
-parse_ruff() {
-    local output="$1" exit_code="$2"
-    if [[ $exit_code -eq 0 ]]; then
-        echo '{"ok":true,"diagnostics":[]}'
-        return
-    fi
-    local diags
-    diags=$(echo "$output" | python3 -c "
-import json, sys
-try:
-    data = json.load(sys.stdin)
-except:
-    print('[]')
-    sys.exit(0)
-out = []
-for d in data:
-    loc = d.get('location', {})
-    out.append({
-        'file': d.get('filename',''),
-        'line': loc.get('row', 1),
-        'col': loc.get('column', 1),
-        'severity': 'error' if d.get('fix') is None else 'warning',
-        'message': '[' + d.get('code','') + '] ' + d.get('message','')
-    })
-print(json.dumps(out))
-")
-    printf '{"ok":false,"diagnostics":%s}\n' "$diags"
+# ---------------------------------------------------------------------------
+# No-tool JSON output
+# ---------------------------------------------------------------------------
+emit_no_tool() {
+  local file="$1"
+  python3 - "${file}" <<'PYEOF'
+import sys, json
+file = sys.argv[1]
+result = {
+    "ok": True,
+    "diagnostics": [],
+    "error": "no tool registered for this filetype"
+}
+print(json.dumps(result))
+PYEOF
 }
 
-# --- commands ----------------------------------------------------------------
-
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
 cmd_check() {
-    local file="$1"
-    [[ -f "$file" ]] || fail "file not found: $file"
+  local file="$1"
 
-    with_lock maybe_update_registry
+  # Normalize file path
+  if command -v realpath &>/dev/null; then
+    file="$(realpath "${file}" 2>/dev/null || echo "${file}")"
+  fi
 
-    local tool
-    tool=$(find_tool_for_file "$file") || {
-        echo '{"ok":true,"diagnostics":[],"skipped":true}'
-        return 0
-    }
+  trap 'release_lock' EXIT INT TERM HUP
+  acquire_lock
 
-    ensure_installed "$tool"
-    run_linter "$tool" "$file"
+  maybe_update_registry
+
+  local tool
+  tool="$(find_tool_for_file "${file}")"
+
+  if [[ -z "${tool}" ]]; then
+    emit_no_tool "${file}"
+    return 0
+  fi
+
+  # Check if tool is installed; install if missing or outdated
+  local pkgs_dir
+  pkgs_dir="$(get_packages_dir)"
+  local pkg_file="${pkgs_dir}/${tool}/package.yaml"
+
+  if [[ -f "${pkg_file}" ]]; then
+    local tool_json
+    tool_json="$(parse_package_yaml "${pkg_file}")"
+    local registry_version
+    registry_version="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d.get('version',''))" "${tool_json}")"
+    local installed_version
+    installed_version="$(read_installed_version "${tool}")"
+
+    if [[ -z "${installed_version}" ]] || [[ "${installed_version}" != "${registry_version}" ]]; then
+      install_tool "${tool}"
+    fi
+  else
+    log "warning: no package file found for tool '${tool}'"
+  fi
+
+  run_linter "${tool}" "${file}"
 }
 
 cmd_install() {
-    local tool="$1"
-    with_lock maybe_update_registry
-    with_lock install_tool "$tool"
+  local tool="$1"
+
+  trap 'release_lock' EXIT INT TERM HUP
+  acquire_lock
+
+  maybe_update_registry
+
+  local pkgs_dir
+  pkgs_dir="$(get_packages_dir)"
+  [[ -d "${pkgs_dir}/${tool}" ]] || die "unknown tool: ${tool}"
+
+  install_tool "${tool}"
 }
 
 cmd_update() {
-    with_lock maybe_update_registry
-    log "registry up to date"
+  trap 'release_lock' EXIT INT TERM HUP
+  acquire_lock
+
+  # Force registry refresh (ignore TTL)
+  if ! git -C "${SCRIPT_DIR}" rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
+    if [[ -d "${REGISTRY_DIR}/.git" ]]; then
+      log "pulling registry..."
+      git -C "${REGISTRY_DIR}" pull --quiet || log "warning: registry pull failed"
+    fi
+  fi
+  printf '%s\n' "$(date +%s)" > "${LAST_CHECKED_PATH}"
+
+  local pkgs_dir
+  pkgs_dir="$(get_packages_dir)"
+
+  local updated=0
+  local current=0
+  local skipped=0
+
+  for tool_dir in "${pkgs_dir}"/*/; do
+    [[ -d "${tool_dir}" ]] || continue
+    local pkg_file="${tool_dir}package.yaml"
+    [[ -f "${pkg_file}" ]] || continue
+
+    local tool
+    tool="$(basename "${tool_dir}")"
+
+    local installed_version
+    installed_version="$(read_installed_version "${tool}")"
+
+    if [[ -z "${installed_version}" ]]; then
+      # Not installed, skip
+      (( skipped++ )) || true
+      continue
+    fi
+
+    local tool_json
+    tool_json="$(parse_package_yaml "${pkg_file}")"
+    local registry_version
+    registry_version="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d.get('version',''))" "${tool_json}")"
+
+    if [[ "${installed_version}" == "${registry_version}" ]]; then
+      log "${tool}: already current (${registry_version})"
+      (( current++ )) || true
+    else
+      log "${tool}: updating ${installed_version} -> ${registry_version}"
+      install_tool "${tool}"
+      (( updated++ )) || true
+    fi
+  done
+
+  log "update complete: ${updated} updated, ${current} already current, ${skipped} not installed (skipped)"
 }
 
 cmd_list() {
-    local reg_packages
-    reg_packages="$(registry_path)"
-    for pkg_yaml in "$reg_packages"/*/package.yaml; do
-        local name installed
-        name=$(grep '^name:' "$pkg_yaml" | awk '{print $2}')
-        if is_installed "$name"; then
-            installed="✓"
-        else
-            installed=" "
-        fi
-        printf "[%s] %s\n" "$installed" "$name"
-    done
+  # Read-only, no lock needed
+  local pkgs_dir
+  pkgs_dir="$(get_packages_dir)"
+
+  printf '%-22s %-14s %-14s %s\n' "TOOL" "INSTALLED" "REGISTRY" "STATUS"
+  printf '%-22s %-14s %-14s %s\n' "----" "---------" "--------" "------"
+
+  for tool_dir in "${pkgs_dir}"/*/; do
+    [[ -d "${tool_dir}" ]] || continue
+    local pkg_file="${tool_dir}package.yaml"
+    [[ -f "${pkg_file}" ]] || continue
+
+    local tool
+    tool="$(basename "${tool_dir}")"
+
+    local tool_json
+    tool_json="$(parse_package_yaml "${pkg_file}")"
+    local registry_version
+    registry_version="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d.get('version',''))" "${tool_json}")"
+
+    local installed_version
+    installed_version="$(read_installed_version "${tool}")"
+
+    local status
+    if [[ -z "${installed_version}" ]]; then
+      status="not installed"
+      installed_version="-"
+    elif [[ "${installed_version}" == "${registry_version}" ]]; then
+      status="current"
+    else
+      status="outdated"
+    fi
+
+    printf '%-22s %-14s %-14s %s\n' "${tool}" "${installed_version:0:13}" "${registry_version}" "${status}"
+  done
 }
 
-# --- main --------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+usage() {
+  cat <<EOF
+Usage: shed <command> [args]
 
-CMD="${1:-help}"
-shift || true
+Commands:
+  check <file>      Lint a file (auto-install tool if needed), print JSON result
+  install <tool>    Install or update a specific tool
+  update            Update all installed tools to registry versions
+  list              List all registered tools and their install status
 
-case "$CMD" in
-    check)   cmd_check "${1:-}" ;;
-    install) cmd_install "${1:-}" ;;
-    update)  cmd_update ;;
-    list)    cmd_list ;;
+Environment:
+  SHED_DIR          Override default directory (default: ~/.linter-shed)
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+main() {
+  check_python3
+
+  mkdir -p "${SHED_DIR}" "${SHED_BIN}" "${TOOLS_DIR}" "${VERSIONS_DIR}"
+
+  local cmd="${1:-}"
+  shift || true
+
+  case "${cmd}" in
+    check)
+      [[ -n "${1:-}" ]] || die "check requires a file argument"
+      cmd_check "$1"
+      ;;
+    install)
+      [[ -n "${1:-}" ]] || die "install requires a tool name"
+      cmd_install "$1"
+      ;;
+    update)
+      cmd_update
+      ;;
+    list)
+      cmd_list
+      ;;
+    help|--help|-h)
+      usage
+      ;;
+    "")
+      usage
+      exit 1
+      ;;
     *)
-        echo "Usage: shed.sh <command> [args]"
-        echo ""
-        echo "Commands:"
-        echo "  check <file>    run the appropriate linter and return JSON diagnostics"
-        echo "  install <tool>  install a tool from the registry"
-        echo "  update          pull latest registry"
-        echo "  list            show available tools and install status"
-        ;;
-esac
+      die "unknown command: ${cmd}. Run 'shed help' for usage."
+      ;;
+  esac
+}
+
+main "$@"

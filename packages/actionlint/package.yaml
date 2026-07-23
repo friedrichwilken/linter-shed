@@ -1,31 +1,28 @@
 name: actionlint
-description: Static checker for GitHub Actions workflow files.
-homepage: https://github.com/rhysd/actionlint
-licenses:
-  - MIT
-languages:
-  - YAML
+description: Static checker for GitHub Actions workflow files
+source: pkg:github/rhysd/actionlint
+version: "1.7.12"
 filetypes:
   - ".github/workflows/*.yaml"
   - ".github/workflows/*.yml"
-  - ".github/actions/**/*.yaml"
-  - ".github/actions/**/*.yml"
-categories:
-  - Linter
-source:
-  id: pkg:github/rhysd/actionlint@v1.7.7
-  asset:
-    - target: darwin_arm64
-      file: "actionlint_{{version}}_darwin_arm64.tar.gz"
-      bin: actionlint
-    - target: darwin_x64
-      file: "actionlint_{{version}}_darwin_amd64.tar.gz"
-      bin: actionlint
-    - target: linux_x64
-      file: "actionlint_{{version}}_linux_amd64.tar.gz"
-      bin: actionlint
-    - target: linux_arm64
-      file: "actionlint_{{version}}_linux_arm64.tar.gz"
-      bin: actionlint
 bin:
-  actionlint: "{{source.asset.bin}}"
+  actionlint: actionlint
+platforms:
+  linux/amd64:
+    asset: actionlint_1.7.12_linux_amd64.tar.gz
+    binary: actionlint
+  linux/arm64:
+    asset: actionlint_1.7.12_linux_arm64.tar.gz
+    binary: actionlint
+  darwin/amd64:
+    asset: actionlint_1.7.12_darwin_amd64.tar.gz
+    binary: actionlint
+  darwin/arm64:
+    asset: actionlint_1.7.12_darwin_arm64.tar.gz
+    binary: actionlint
+  windows/amd64:
+    asset: actionlint_1.7.12_windows_amd64.zip
+    binary: actionlint.exe
+  windows/arm64:
+    asset: actionlint_1.7.12_windows_arm64.zip
+    binary: actionlint.exe

@@ -1,0 +1,27 @@
+name: golangci-lint
+description: Fast Go linters runner aggregating 100+ linters
+source: pkg:github/golangci/golangci-lint
+version: "1.64.8"
+filetypes:
+  - "*.go"
+bin:
+  golangci-lint: golangci-lint
+platforms:
+  linux/amd64:
+    asset: golangci-lint-1.64.8-linux-amd64.tar.gz
+    binary: golangci-lint-1.64.8-linux-amd64/golangci-lint
+  linux/arm64:
+    asset: golangci-lint-1.64.8-linux-arm64.tar.gz
+    binary: golangci-lint-1.64.8-linux-arm64/golangci-lint
+  darwin/amd64:
+    asset: golangci-lint-1.64.8-darwin-amd64.tar.gz
+    binary: golangci-lint-1.64.8-darwin-amd64/golangci-lint
+  darwin/arm64:
+    asset: golangci-lint-1.64.8-darwin-arm64.tar.gz
+    binary: golangci-lint-1.64.8-darwin-arm64/golangci-lint
+  windows/amd64:
+    asset: golangci-lint-1.64.8-windows-amd64.zip
+    binary: golangci-lint-1.64.8-windows-amd64/golangci-lint.exe
+  windows/arm64:
+    asset: golangci-lint-1.64.8-windows-arm64.zip
+    binary: golangci-lint-1.64.8-windows-arm64/golangci-lint.exe

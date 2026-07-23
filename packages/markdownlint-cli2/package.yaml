@@ -1,0 +1,10 @@
+name: markdownlint-cli2
+description: Fast, flexible CLI for markdownlint -- lints Markdown and MDX files
+source: pkg:npm/markdownlint-cli2
+version: "0.17.2"
+filetypes:
+  - "*.md"
+  - "*.mdx"
+  - "*.markdown"
+bin:
+  markdownlint-cli2: markdownlint-cli2

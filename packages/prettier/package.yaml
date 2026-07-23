@@ -1,0 +1,21 @@
+name: prettier
+description: Opinionated code formatter for JS, TS, JSON, YAML, Markdown, CSS, and more
+source: pkg:npm/prettier
+version: "3.5.3"
+filetypes:
+  - "*.js"
+  - "*.jsx"
+  - "*.ts"
+  - "*.tsx"
+  - "*.json"
+  - "*.yaml"
+  - "*.yml"
+  - "*.md"
+  - "*.mdx"
+  - "*.css"
+  - "*.scss"
+  - "*.less"
+  - "*.html"
+  - "*.graphql"
+bin:
+  prettier: prettier

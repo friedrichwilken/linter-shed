@@ -1,16 +1,34 @@
 name: ruff
-description: An extremely fast Python linter and code formatter.
-homepage: https://github.com/astral-sh/ruff
-licenses:
-  - MIT
-languages:
-  - Python
+description: Extremely fast Python linter and formatter
+source: pkg:github/astral-sh/ruff
+version: "0.11.13"
 filetypes:
   - "*.py"
-categories:
-  - Linter
-  - Formatter
-source:
-  id: pkg:pypi/ruff@0.9.10
+  - "*.pyi"
 bin:
-  ruff: pip:ruff
+  ruff: ruff
+platforms:
+  linux/amd64:
+    asset: ruff-x86_64-unknown-linux-gnu.tar.gz
+    binary: ruff-x86_64-unknown-linux-gnu/ruff
+  linux/arm64:
+    asset: ruff-aarch64-unknown-linux-gnu.tar.gz
+    binary: ruff-aarch64-unknown-linux-gnu/ruff
+  linux/amd64/musl:
+    asset: ruff-x86_64-unknown-linux-musl.tar.gz
+    binary: ruff-x86_64-unknown-linux-musl/ruff
+  linux/arm64/musl:
+    asset: ruff-aarch64-unknown-linux-musl.tar.gz
+    binary: ruff-aarch64-unknown-linux-musl/ruff
+  darwin/amd64:
+    asset: ruff-x86_64-apple-darwin.tar.gz
+    binary: ruff-x86_64-apple-darwin/ruff
+  darwin/arm64:
+    asset: ruff-aarch64-apple-darwin.tar.gz
+    binary: ruff-aarch64-apple-darwin/ruff
+  windows/amd64:
+    asset: ruff-x86_64-pc-windows-msvc.zip
+    binary: ruff-x86_64-pc-windows-msvc/ruff.exe
+  windows/arm64:
+    asset: ruff-aarch64-pc-windows-msvc.zip
+    binary: ruff-aarch64-pc-windows-msvc/ruff.exe

@@ -1,0 +1,27 @@
+name: hadolint
+description: Dockerfile linter that checks best practices and warns about common mistakes
+source: pkg:github/hadolint/hadolint
+version: "2.14.0"
+filetypes:
+  - "Dockerfile"
+  - "**/Dockerfile"
+  - "*.dockerfile"
+  - "Dockerfile.*"
+bin:
+  hadolint: hadolint
+platforms:
+  linux/amd64:
+    asset: hadolint-Linux-x86_64
+    binary: .
+  linux/arm64:
+    asset: hadolint-Linux-arm64
+    binary: .
+  darwin/amd64:
+    asset: hadolint-macos-x86_64
+    binary: .
+  darwin/arm64:
+    asset: hadolint-macos-arm64
+    binary: .
+  windows/amd64:
+    asset: hadolint-Windows-x86_64.exe
+    binary: .

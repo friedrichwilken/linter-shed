@@ -1,28 +1,55 @@
 #!/usr/bin/env bash
-# install.sh — bootstrap linter-shed into ~/.linter-shed
 set -euo pipefail
 
-SHED_DIR="${LINTER_SHED_DIR:-$HOME/.linter-shed}"
-SHED_BIN="$SHED_DIR/bin"
-REPO_URL="https://github.com/I549741/linter-shed.git"
+REPO_URL="https://github.com/friedrichwilken/linter-shed.git"
+LINTER_SHED_DIR="${LINTER_SHED_DIR:-$HOME/.linter-shed}"
+REGISTRY_DIR="$LINTER_SHED_DIR/registry"
+BIN_DIR="$LINTER_SHED_DIR/bin"
+VERSIONS_DIR="$LINTER_SHED_DIR/versions"
+LOGS_DIR="$LINTER_SHED_DIR/logs"
 
-echo "[linter-shed] installing to $SHED_DIR"
-mkdir -p "$SHED_BIN"
+echo "==> Installing linter-shed to $LINTER_SHED_DIR"
+
+# Create necessary directories
+mkdir -p "$BIN_DIR" "$VERSIONS_DIR" "$LOGS_DIR"
 
 # Clone or update registry
-if [[ -d "$SHED_DIR/registry/.git" ]]; then
-    echo "[linter-shed] updating registry..."
-    git -C "$SHED_DIR/registry" pull --ff-only --quiet
+if [ -d "$REGISTRY_DIR/.git" ]; then
+  echo "==> Updating existing registry..."
+  git -C "$REGISTRY_DIR" fetch origin
+  git -C "$REGISTRY_DIR" reset --hard origin/main
 else
-    echo "[linter-shed] cloning registry..."
-    git clone --depth=1 "$REPO_URL" "$SHED_DIR/registry"
+  echo "==> Cloning linter-shed registry..."
+  git clone "$REPO_URL" "$REGISTRY_DIR"
 fi
 
-# Install shed.sh itself
-cp "$SHED_DIR/registry/shed.sh" "$SHED_BIN/shed"
-chmod +x "$SHED_BIN/shed"
+# Copy shed.sh to bin/shed
+if [ ! -f "$REGISTRY_DIR/shed.sh" ]; then
+  echo "ERROR: shed.sh not found in registry" >&2
+  exit 1
+fi
 
-date +%s > "$SHED_DIR/last-checked"
+cp "$REGISTRY_DIR/shed.sh" "$BIN_DIR/shed"
+chmod +x "$BIN_DIR/shed"
 
-echo "[linter-shed] installed. Add to PATH: export PATH=\"$SHED_BIN:\$PATH\""
-echo "[linter-shed] run 'shed list' to see available tools"
+# Write last-checked timestamp
+date -u +"%Y-%m-%dT%H:%M:%SZ" > "$LINTER_SHED_DIR/.last-checked"
+
+echo ""
+echo "==> linter-shed installed successfully."
+echo ""
+echo "Next steps:"
+echo ""
+echo "  1. Add shed to your PATH. Add this line to your ~/.zshrc or ~/.bashrc:"
+echo ""
+echo "       export PATH=\"$BIN_DIR:\$PATH\""
+echo ""
+echo "  2. Reload your shell:"
+echo ""
+echo "       source ~/.zshrc"
+echo ""
+echo "  3. Add the linter-shed marketplace to Claude Code:"
+echo ""
+echo "       claude mcp add --scope user linter-shed $BIN_DIR/shed"
+echo ""
+echo "  Run 'shed --help' to get started."

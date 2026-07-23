@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/claude-code/main/schemas/marketplace.json",
+  "name": "linter-shed",
+  "owner": {
+    "name": "friedrichwilken"
+  },
+  "metadata": {
+    "description": "Single-plugin marketplace for linter-shed, a tool manager and linter runner for Claude Code projects"
+  },
+  "plugins": [
+    {
+      "name": "linter-shed",
+      "source": "../",
+      "description": "Tool manager and linter runner for Claude Code projects. Install, update, and run linters via a unified shed interface.",
+      "version": "0.1.0",
+      "author": {
+        "name": "friedrichwilken"
+      },
+      "category": "quality",
+      "tags": ["linter", "tools", "quality", "formatting", "static-analysis"]
+    }
+  ]
+}

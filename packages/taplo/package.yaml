@@ -1,0 +1,24 @@
+name: taplo
+description: TOML language server, formatter, and linter
+source: pkg:github/tamasfe/taplo
+version: "0.9.3"
+filetypes:
+  - "*.toml"
+bin:
+  taplo: taplo
+platforms:
+  linux/amd64:
+    asset: taplo-linux-x86_64.gz
+    binary: .
+  linux/arm64:
+    asset: taplo-linux-aarch64.gz
+    binary: .
+  darwin/amd64:
+    asset: taplo-darwin-x86_64.gz
+    binary: .
+  darwin/arm64:
+    asset: taplo-darwin-aarch64.gz
+    binary: .
+  windows/amd64:
+    asset: taplo-windows-x86_64.zip
+    binary: taplo.exe
