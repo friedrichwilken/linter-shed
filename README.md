@@ -22,14 +22,10 @@ format Claude can act on.
 ### Step 1 -- install the `shed` CLI
 
 ```bash
-# macOS / Linux (curl)
 curl -fsSL https://raw.githubusercontent.com/friedrichwilken/linter-shed/main/install.sh | sh
-
-# or: go install
-go install github.com/friedrichwilken/linter-shed/cmd/shed@latest
 ```
 
-Binaries are placed in `~/.linter-shed/bin/`. Add that to your PATH:
+Binaries are placed in `~/.linter-shed/bin/`. Add to PATH:
 
 ```bash
 export PATH="$HOME/.linter-shed/bin:$PATH"
@@ -76,7 +72,14 @@ You can invoke it manually to re-check a file without making changes.
 | `luacheck` | Lua | Static analysis, undefined globals, unused variables |
 
 Tool selection is automatic: shed reads the file extension and dispatches
-to every tool whose `filetypes` pattern matches.
+to the best matching tool. When multiple tools match (e.g. both `prettier`
+and `yamllint` handle `*.yaml`), the most specific pattern wins; ties go
+to the tool that sorts last alphabetically.
+
+**Note:** `prettier` wins for `*.json`, `*.yaml`, `*.yml`, `*.md`, `*.ts`,
+`*.js` -- it checks formatting correctness. `yamllint` handles `*.yaml`
+when prettier is not installed. `actionlint` always wins for
+`.github/workflows/*.yaml` regardless of prettier.
 
 ## How it works
 

@@ -336,7 +336,10 @@ get_packages_dir() {
   if git -C "${SCRIPT_DIR}" rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
     echo "${BUNDLED_REGISTRY_DIR}"
   else
-    if [[ -d "${REGISTRY_DIR}" ]]; then
+    # Installed mode: registry is a full repo clone, packages/ is a subdir
+    if [[ -d "${REGISTRY_DIR}/packages" ]]; then
+      echo "${REGISTRY_DIR}/packages"
+    elif [[ -d "${REGISTRY_DIR}" ]]; then
       echo "${REGISTRY_DIR}"
     else
       echo "${BUNDLED_REGISTRY_DIR}"
@@ -680,19 +683,23 @@ install_tool() {
         local fallback_method
         fallback_method="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d.get('install_fallback',{}).get('method',''))" "${tool_json}")"
         if [[ "${fallback_method}" == "luarocks" ]]; then
+          if ! command -v luarocks &>/dev/null; then
+            log "${tool}: luarocks not found -- install luarocks to use this tool (brew install luarocks / apt install luarocks)"
+            return 0
+          fi
           local pkg
           pkg="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d.get('install_fallback',{}).get('package',''))" "${tool_json}")"
           local ver
           ver="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d.get('install_fallback',{}).get('version',''))" "${tool_json}")"
           log "installing ${tool} via luarocks..."
-          luarocks install "${pkg}" "${ver}" --local || die "luarocks install failed for ${tool}"
-          # luarocks installs to ~/.luarocks/bin
+          luarocks install "${pkg}" "${ver}" --local || { log "${tool}: luarocks install failed"; return 1; }
           local luarocks_bin="${HOME}/.luarocks/bin"
           mkdir -p "${TOOLS_DIR}/${tool}/bin" "${SHED_BIN}"
           ln -sf "${luarocks_bin}/${tool}" "${TOOLS_DIR}/${tool}/bin/${tool}"
           ln -sf "${luarocks_bin}/${tool}" "${SHED_BIN}/${tool}"
         else
-          die "no package available for platform ${platform} and tool ${tool}"
+          log "${tool}: no package available for platform ${platform} -- skipping"
+          return 0
         fi
       else
         local asset binary_in_archive
